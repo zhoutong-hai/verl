@@ -25,7 +25,71 @@ from .engine import FSDPEngineConfig, McoreEngineConfig
 from .model import HFModelConfig
 from .optimizer import OptimizerConfig
 
-__all__ = ["PolicyLossConfig", "RouterReplayConfig", "ActorConfig", "FSDPActorConfig", "McoreActorConfig"]
+__all__ = [
+    "SelfDistillationConfig",
+    "PolicyLossConfig",
+    "RouterReplayConfig",
+    "ActorConfig",
+    "FSDPActorConfig",
+    "McoreActorConfig",
+]
+
+
+@dataclass
+class SelfDistillationConfig(BaseConfig):
+    """Configuration for SDPO-style self-distillation.
+
+    Distillation is enabled when ``policy_loss.loss_mode == "sdpo"``.
+    """
+
+    full_logit_distillation: bool = True
+    alpha: float = 0.0
+    success_reward_threshold: float = 1.0
+    teacher_regularization: str = "ema"
+    teacher_update_rate: float = 0.05
+    distillation_topk: Optional[int] = None
+    distillation_add_tail: bool = True
+    max_reprompt_len: int = 10240
+    reprompt_truncation: str = "right"
+    dont_reprompt_on_self_success: bool = False
+    remove_thinking_from_demonstration: bool = False
+    is_clip: Optional[float] = None
+    reprompt_template: str = (
+        "{prompt}{solution}{feedback}\n\n"
+        "Correctly solve the original question.\n"
+    )
+    solution_template: str = (
+        "\n"
+        "Correct solution:\n\n"
+        "{successful_previous_attempt}\n\n"
+    )
+    feedback_template: str = (
+        "\n"
+        "The following is feedback from your unsuccessful earlier attempt:\n\n"
+        "{feedback_raw}\n\n"
+    )
+    include_environment_feedback: bool = False
+    environment_feedback_only_without_solution: bool = False
+
+    def __post_init__(self):
+        if not 0.0 <= self.alpha <= 1.0:
+            raise ValueError(f"self_distillation.alpha must be in [0,1], got {self.alpha}")
+        valid_teacher_regularization = ["ema", "trust-region"]
+        if self.teacher_regularization not in valid_teacher_regularization:
+            raise ValueError(
+                "self_distillation.teacher_regularization must be one of "
+                f"{valid_teacher_regularization}, got {self.teacher_regularization}"
+            )
+        if not 0.0 <= self.teacher_update_rate <= 1.0:
+            raise ValueError(
+                f"self_distillation.teacher_update_rate must be in [0,1], got {self.teacher_update_rate}"
+            )
+        if self.distillation_topk is not None and self.distillation_topk <= 0:
+            raise ValueError(
+                f"self_distillation.distillation_topk must be a positive integer, got {self.distillation_topk}"
+            )
+        if self.is_clip is not None and self.is_clip <= 0:
+            raise ValueError(f"self_distillation.is_clip must be positive, got {self.is_clip}")
 
 
 @dataclass
@@ -64,7 +128,7 @@ class PolicyLossConfig(BaseConfig):
     The inheritance from BaseConfig provides omegaconf.DictConfig-like interface for a dataclass config.
 
     Args:
-        loss_mode (str): Loss function mode. Options: 'vanilla', 'clip-cov', 'kl-cov', 'gpg'.
+        loss_mode (str): Loss function mode. Options: 'vanilla', 'clip-cov', 'kl-cov', 'gpg', 'sdpo'.
         clip_cov_ratio (float): Ratio of tokens to be clipped for clip-cov loss.
         clip_cov_lb (float): Lower bound for clip-cov loss.
         clip_cov_ub (float): Upper bound for clip-cov loss.
@@ -162,6 +226,7 @@ class ActorConfig(BaseConfig):
     rollout_n: int = MISSING  # must be override by sampling config
     model_config: HFModelConfig = field(default_factory=BaseConfig)
     router_replay: RouterReplayConfig = field(default_factory=RouterReplayConfig)
+    self_distillation: SelfDistillationConfig = field(default_factory=SelfDistillationConfig)
 
     # Store global batch info for loss aggregation:
     # dp_size: data parallel size

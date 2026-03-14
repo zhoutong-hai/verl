@@ -37,7 +37,7 @@ from omegaconf import OmegaConf
 from torch import nn
 
 from verl import DataProto
-from verl.trainer.ppo.core_algos import agg_loss, get_policy_loss_fn, kl_penalty
+from verl.trainer.ppo.core_algos import agg_loss, compute_self_distillation_loss, get_policy_loss_fn, kl_penalty
 from verl.utils.device import get_device_id, get_torch_device
 from verl.utils.megatron.pipeline_parallel import make_batch_generator
 from verl.utils.megatron.router_replay_patch import RouterReplay, RouterReplayAction
@@ -348,6 +348,8 @@ class MegatronPPOActor(BasePPOActor):
             "old_log_probs",
             "advantages",
         ]
+        if self.config.policy_loss.get("loss_mode", "vanilla") == "sdpo":
+            select_keys.extend(["teacher_log_probs", "self_distillation_mask"])
         if self.config.use_kl_loss:
             select_keys.append("ref_log_prob")
         # Include pre-computed IS weights if present in batch
@@ -487,20 +489,42 @@ class MegatronPPOActor(BasePPOActor):
 
                 loss_mode = self.config.policy_loss.get("loss_mode", "vanilla")
 
-                policy_loss_fn = get_policy_loss_fn(loss_mode)
-
                 # Extract pre-computed rollout correction weights if present
                 # Weights are computed centrally in trainer and added when algorithm.rollout_is=True
                 rollout_is_weights = data.get("rollout_is_weights", None)
-                pg_loss, pg_metrics = policy_loss_fn(
-                    old_log_prob=old_log_prob,
-                    log_prob=log_prob,
-                    advantages=advantages,
-                    response_mask=response_mask,
-                    loss_agg_mode=loss_agg_mode,
-                    config=self.config,
-                    rollout_is_weights=rollout_is_weights,
-                )
+                if loss_mode == "sdpo":
+                    self_distillation_cfg = getattr(self.config, "self_distillation", None)
+                    if self_distillation_cfg is None:
+                        raise ValueError("loss_mode='sdpo' requires actor.self_distillation config.")
+                    if self_distillation_cfg.full_logit_distillation:
+                        raise NotImplementedError(
+                            "Megatron SDPO on v0.7.0 supports token-level distillation only. "
+                            "Set actor.self_distillation.full_logit_distillation=False."
+                        )
+                    pg_loss, pg_metrics = compute_self_distillation_loss(
+                        student_log_probs=log_prob,
+                        teacher_log_probs=data["teacher_log_probs"],
+                        response_mask=response_mask,
+                        self_distillation_config=self_distillation_cfg,
+                        old_log_probs=old_log_prob,
+                        self_distillation_mask=data.get("self_distillation_mask"),
+                        loss_agg_mode=loss_agg_mode,
+                        rollout_is_weights=rollout_is_weights,
+                    )
+                    pg_metrics["self_distillation/empty_target_batch"] = (
+                        data["self_distillation_mask"].sum().item() == 0
+                    )
+                else:
+                    policy_loss_fn = get_policy_loss_fn(loss_mode)
+                    pg_loss, pg_metrics = policy_loss_fn(
+                        old_log_prob=old_log_prob,
+                        log_prob=log_prob,
+                        advantages=advantages,
+                        response_mask=response_mask,
+                        loss_agg_mode=loss_agg_mode,
+                        config=self.config,
+                        rollout_is_weights=rollout_is_weights,
+                    )
                 stats.update(pg_metrics)
 
                 # Skip if using bypass_mode loss (metrics already computed in pg_metrics)

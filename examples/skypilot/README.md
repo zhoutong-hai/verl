@@ -55,6 +55,19 @@ sky launch -c verl-grpo verl-grpo.yaml --secret WANDB_API_KEY -y
 ```
 Runs GRPO (Group Relative Policy Optimization) training on MATH dataset using Qwen2.5-7B-Instruct model. Memory-optimized configuration for 2 nodes. Based on examples in [`../grpo_trainer/`](../grpo_trainer/).
 
+### SDPO Megatron Training
+```bash
+sky launch -c verl-sdpo examples/skypilot/verl-sdpo-megatron-llama33-4nodes.yaml --secret WANDB_API_KEY -y
+```
+Runs the custom `v0.7.0` SDPO Megatron port from the synced local workdir. The example mirrors an Arrakis-style multi-node launcher for Llama 3.3 70B and uses token-level SDPO with EMA teacher updates.
+
+### SDPO Megatron Smoke Test
+```bash
+sky launch -c verl-sdpo-smoke examples/skypilot/verl-sdpo-megatron-smoke-qwen05b.yaml -y
+```
+Runs the same custom local SDPO Megatron branch, but on `Qwen/Qwen2.5-0.5B-Instruct` plus GSM8K for a very small smoke test. This keeps the SkyPilot and Megatron environment shape while using a cheap public model. The YAML defaults to `VARIANT=sdpo`; set `envs.VARIANT` to `grpo` if you want the baseline path instead. The current version expects pre-staged assets on the node under `/hai/zhoutong/sdpo_megatron_smoke_qwen25_05b/` instead of downloading them during setup.
+It clones `https://github.com/zhoutong-hai/verl.git` on branch `codex/sdpo-megatron-v070`, so the remote job runs the SDPO branch directly instead of a fresh upstream checkout.
+
 ### Multi-turn Tool Usage Training
 ```bash
 sky launch -c verl-multiturn verl-multiturn-tools.yaml --secret WANDB_API_KEY --secret HF_TOKEN -y

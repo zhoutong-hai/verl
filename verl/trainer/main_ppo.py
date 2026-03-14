@@ -126,9 +126,19 @@ class TaskRunner:
         from verl.trainer.ppo.ray_trainer import Role
 
         use_legacy_worker_impl = config.trainer.get("use_legacy_worker_impl", "auto")
+        self_distillation_cfg = config.actor_rollout_ref.actor.get("self_distillation", None)
+        loss_mode = config.actor_rollout_ref.actor.policy_loss.get("loss_mode", "vanilla")
+        self_distillation_needs_ref = self_distillation_cfg is not None and loss_mode == "sdpo"
+
+        if self_distillation_needs_ref and (
+            config.algorithm.use_kl_in_reward or config.actor_rollout_ref.actor.use_kl_loss
+        ):
+            raise ValueError("SDPO on v0.7.0 cannot share the reference policy with KL regularization.")
 
         # use new model engine implementation
         if use_legacy_worker_impl == "disable":
+            if self_distillation_needs_ref:
+                raise ValueError("SDPO is only supported with the legacy worker implementation on v0.7.0.")
             from verl.workers.engine_workers import ActorRolloutRefWorker
 
             actor_rollout_cls = ActorRolloutRefWorker
@@ -160,8 +170,9 @@ class TaskRunner:
         else:
             raise NotImplementedError
 
-        self.role_worker_mapping[Role.ActorRollout] = ray.remote(actor_rollout_cls)
-        self.mapping[Role.ActorRollout] = "global_pool"
+        actor_role = Role.ActorRolloutRef if self_distillation_needs_ref else Role.ActorRollout
+        self.role_worker_mapping[actor_role] = ray.remote(actor_rollout_cls)
+        self.mapping[actor_role] = "global_pool"
         return actor_rollout_cls, ray_worker_group_cls
 
     def add_critic_worker(self, config):

@@ -1,0 +1,33 @@
+defaults:
+  - ppo_megatron_trainer
+  - _self_
+
+actor_rollout_ref:
+  actor:
+    policy_loss:
+      loss_mode: sdpo
+    self_distillation:
+      # The Megatron port on v0.7.0 currently uses token-level distillation only.
+      full_logit_distillation: false
+      alpha: 1.0
+      success_reward_threshold: 1.0
+      teacher_regularization: ema
+      teacher_update_rate: 0.01
+      dont_reprompt_on_self_success: true
+      remove_thinking_from_demonstration: false
+      include_environment_feedback: false
+      environment_feedback_only_without_solution: false
+      max_reprompt_len: 16384
+      reprompt_truncation: right
+      is_clip: 2.0
+  rollout:
+    calculate_log_probs: true
+
+algorithm:
+  adv_estimator: grpo
+  rollout_correction:
+    rollout_is: token
+    rollout_is_threshold: 2.0
+
+trainer:
+  critic_warmup: 0

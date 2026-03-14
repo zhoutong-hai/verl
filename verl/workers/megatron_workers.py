@@ -747,6 +747,7 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
 
         metrics["actor/lr"] = get_megatron_last_lr(self.actor_optimizer)
         self.actor_optimizer_scheduler.step(1)
+        self._maybe_update_self_distillation_teacher()
 
         # TODO: here, we should return all metrics
         output = DataProto(meta_info={"metrics": metrics})
@@ -761,6 +762,37 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
 
         aggressive_empty_cache(force_sync=True)
         return output
+
+    def _maybe_update_self_distillation_teacher(self) -> None:
+        if not self._is_ref:
+            return
+        loss_mode = self.config.actor.policy_loss.get("loss_mode", "vanilla")
+        if loss_mode != "sdpo":
+            return
+
+        sd_cfg = self.config.actor.get("self_distillation", None)
+        if sd_cfg is None:
+            return
+
+        teacher_regularization = sd_cfg.get("teacher_regularization", "ema")
+        if teacher_regularization != "ema":
+            raise NotImplementedError("Megatron SDPO on v0.7.0 currently supports teacher_regularization='ema' only.")
+
+        update_rate = sd_cfg.get("teacher_update_rate", 0.0)
+        if update_rate == 0.0:
+            return
+
+        if self._ref_is_offload_param:
+            load_megatron_model_to_gpu(self.ref_module, load_grad=False)
+
+        with torch.no_grad():
+            for ref_chunk, actor_chunk in zip(self.ref_module, self.actor_module, strict=True):
+                for ref_param, actor_param in zip(ref_chunk.parameters(), actor_chunk.parameters(), strict=True):
+                    actor_data = actor_param.data.to(device=ref_param.device, dtype=ref_param.dtype)
+                    ref_param.data.mul_(1.0 - update_rate).add_(actor_data, alpha=update_rate)
+
+        if self._ref_is_offload_param:
+            offload_megatron_model_to_cpu(self.ref_module)
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="rollout"))
     @GPUMemoryLogger(role="generate_sequences", logger=logger)
