@@ -69,17 +69,72 @@ What changes:
 - actor loss swapped from PPO policy loss to self-distillation loss
 - EMA update from actor to teacher after optimization
 
+## What the teacher actually is in this port
+
+The shortest implementation summary is:
+
+- GRPO by itself does not require a reference model.
+- GRPO only uses a reference policy when KL regularization is enabled.
+- SDPO needs a teacher, so this port reuses the existing reference-policy slot as that teacher.
+- So SDPO does not add a brand new third model type. It repurposes `ref_module` from "KL baseline" into "EMA teacher."
+
+In practice, that means:
+
+- when `loss_mode: sdpo`, the trainer forces the `ActorRolloutRef` worker path so both actor and ref are available,
+- SDPO forbids combining this teacher path with KL regularization on `v0.7.0`,
+- actor and teacher both start from the same `model.path`,
+- the teacher is then updated with EMA after each actor step,
+- the teacher is used only for scoring the sampled response under reprompted teacher context.
+
+This is a different role from a standard KL reference policy:
+
+- KL ref policy: usually frozen, used to measure divergence from the actor
+- SDPO teacher in this port: moving, used to produce `teacher_log_probs` for distillation
+
+Memory and lifecycle notes:
+
+- the teacher exists as `ref_module` inside the Megatron worker,
+- it may stay on GPU, or be offloaded to CPU depending on ref offload settings,
+- it is loaded back to GPU when computing teacher log-probs or applying EMA.
+
+Checkpointing note:
+
+- as implemented today, the Megatron checkpoint manager is wired to the actor checkpoint path,
+- the EMA teacher does not appear to be separately saved and restored as its own checkpoint artifact,
+- on startup or resume, the teacher is rebuilt from `model.path` and then continues tracking the actor via EMA.
+
+So if you are asking "did SDPO introduce a separate persistent teacher model?", the practical answer is:
+
+- separate at runtime: yes
+- separate model class: no
+- separately checkpointed today: no
+- always resident on GPU: no
+  
+Relevant files:
+
+- `verl/trainer/main_ppo.py`
+- `verl/workers/megatron_workers.py`
+- `verl/trainer/ppo/ray_trainer.py`
+
 ## End-to-end data flow
 
+Phase 1a: rollout and reward
+
 ```mermaid
-flowchart TD
+flowchart LR
     A["Dataset batch<br/>tensor: input_ids, attention_mask, position_ids<br/>non-tensor: uid, raw_prompt, ..."] --> B["Rollout generation<br/>sample responses"]
     B --> C["Post-rollout batch<br/>add: responses, response_mask, old_log_probs"]
     C --> D["Reward computation<br/>reward_tensor + optional reward_extra_info.feedback"]
     C --> E["Normal RL path continues<br/>values, token_level_scores, advantages, ..."]
-    D --> F["SDPO candidate mining<br/>group by uid<br/>mark successes by reward threshold"]
-    A --> F
-    C --> F
+```
+
+Phase 1b: build SDPO teacher targets
+
+```mermaid
+flowchart LR
+    D["Reward outputs<br/>reward_tensor<br/>optional feedback"] --> F["SDPO candidate mining<br/>group by uid<br/>mark successes by reward threshold"]
+    C["Post-rollout batch still provides<br/>responses<br/>response_mask<br/>old_log_probs"] --> F
+    A["Dataset batch still provides<br/>uid and raw_prompt"] --> F
     F --> G["Build teacher reprompt<br/>original question<br/>+ successful attempt<br/>+ optional feedback"]
     G --> H["Tokenize teacher prompt<br/>teacher_input_ids<br/>teacher_attention_mask<br/>teacher_position_ids"]
     C --> I["Keep original sampled response fixed"]
@@ -87,7 +142,13 @@ flowchart TD
     I --> J
     J --> K["Reference model scoring<br/>compute log p_teacher(original response | reprompted context)"]
     K --> L["Add to training batch<br/>teacher_log_probs<br/>self_distillation_mask"]
-    E --> L
+```
+
+Phase 2: actor update and teacher refresh
+
+```mermaid
+flowchart LR
+    E["Normal RL path continues<br/>values, token_level_scores, advantages, ..."] --> L["Training batch now includes<br/>teacher_log_probs<br/>self_distillation_mask"]
     L --> M["Megatron actor update<br/>compute current student log_probs on original response"]
     M --> N["SDPO loss<br/>compare student_log_probs vs teacher_log_probs<br/>masked by response_mask and self_distillation_mask"]
     N --> O["Actor optimizer step"]
@@ -96,25 +157,28 @@ flowchart TD
 
 ## GRPO vs SDPO-on-GRPO: batch fields
 
+Regular GRPO:
+
 ```mermaid
 flowchart LR
-    subgraph G["Regular GRPO batch flow"]
-        G1["Rollout batch<br/>responses<br/>response_mask<br/>old_log_probs"] --> G2["Reward step<br/>reward_tensor<br/>token_level_scores"]
-        G2 --> G3["Advantage step<br/>advantages<br/>returns"]
-        G3 --> G4["Actor update inputs<br/>old_log_probs<br/>advantages<br/>response_mask"]
-        G4 --> G5["Actor loss is advantage-based"]
-    end
+    G1["Rollout batch<br/>responses<br/>response_mask<br/>old_log_probs"] --> G2["Reward step<br/>reward_tensor<br/>token_level_scores"]
+    G2 --> G3["Advantage step<br/>advantages<br/>returns"]
+    G3 --> G4["Actor update inputs<br/>old_log_probs<br/>advantages<br/>response_mask"]
+    G4 --> G5["Actor loss is advantage-based"]
+```
 
-    subgraph S["SDPO port batch flow"]
-        S1["Rollout batch<br/>responses<br/>response_mask<br/>old_log_probs<br/>raw_prompt<br/>uid"] --> S2["Reward step<br/>reward_tensor<br/>token_level_scores<br/>optional feedback"]
-        S2 --> S3["GRPO advantage step still runs<br/>advantages<br/>returns"]
-        S2 --> S4["SDPO teacher prep<br/>successful sibling mining by uid<br/>reprompt construction"]
-        S4 --> S5["Reference scoring under teacher context<br/>teacher_log_probs"]
-        S5 --> S6["Mask valid SDPO samples<br/>self_distillation_mask"]
-        S3 --> S7["Final actor batch in SDPO mode"]
-        S6 --> S7
-        S7["Carries both:<br/>old_log_probs<br/>advantages<br/>response_mask<br/>teacher_log_probs<br/>self_distillation_mask"] --> S8["Actor loss uses teacher_log_probs<br/>not advantages<br/>for main policy update"]
-    end
+SDPO port:
+
+```mermaid
+flowchart LR
+    S1["Rollout batch<br/>responses<br/>response_mask<br/>old_log_probs<br/>raw_prompt<br/>uid"] --> S2["Reward step<br/>reward_tensor<br/>token_level_scores<br/>optional feedback"]
+    S2 --> S3["GRPO advantage step still runs<br/>advantages<br/>returns"]
+    S2 --> S4["SDPO teacher prep<br/>successful sibling mining by uid<br/>reprompt construction"]
+    S4 --> S5["Reference scoring under teacher context<br/>teacher_log_probs"]
+    S5 --> S6["Mask valid SDPO samples<br/>self_distillation_mask"]
+    S3 --> S7["Final actor batch in SDPO mode"]
+    S6 --> S7
+    S7["Carries both:<br/>old_log_probs<br/>advantages<br/>response_mask<br/>teacher_log_probs<br/>self_distillation_mask"] --> S8["Actor loss uses teacher_log_probs<br/>not advantages<br/>for main policy update"]
 ```
 
 Key reading:
@@ -753,3 +817,31 @@ Paper:
 The shortest correct summary of this port is:
 
 > Keep the normal `verl` Megatron RL loop. Identify successful trajectories in each prompt group. Rebuild a teacher prompt from the original question plus a successful attempt and optional feedback. Use the reference model to score the original sampled response under that teacher context. Train the actor against those teacher token probabilities instead of the normal PPO policy loss. Then update the teacher with EMA.
+
+## Appendix: Sequence-diagram view
+
+```mermaid
+sequenceDiagram
+    participant D as Dataset batch
+    participant T as Ray trainer
+    participant R as Rollout actor
+    participant W as Reward function
+    participant Ref as Reference teacher
+    participant A as Megatron actor worker
+
+    D->>T: prompt batch with uid and raw_prompt
+    T->>R: generate responses
+    R-->>T: responses, response_mask, old_log_probs
+    T->>W: score sampled responses
+    W-->>T: reward_tensor and optional feedback
+    T->>T: compute GRPO advantages
+    T->>T: mine successful siblings by uid
+    T->>T: build teacher reprompt
+    T->>Ref: score original response under teacher context
+    Ref-->>T: teacher_log_probs
+    T->>A: actor batch with advantages, old_log_probs, teacher_log_probs, self_distillation_mask
+    A->>A: compute student log_probs
+    A->>A: compute SDPO loss
+    A-->>T: actor optimizer step finished
+    A->>Ref: EMA update teacher weights
+```

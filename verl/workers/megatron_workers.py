@@ -354,7 +354,13 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
             self._ref_is_offload_param = self.config.ref.megatron.get("param_offload", False)
 
     def _build_model_optimizer(
-        self, model_path, optim_config, override_model_config, override_transformer_config, override_ddp_config=None
+        self,
+        model_path,
+        optim_config,
+        override_model_config,
+        override_transformer_config,
+        override_ddp_config=None,
+        build_ref: bool = False,
     ):
         from verl.utils.megatron.optimizer import (
             get_megatron_optimizer,
@@ -364,6 +370,8 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
         from verl.utils.megatron_utils import McoreModuleWrapperConfig, make_megatron_module
         from verl.utils.model import get_generation_config, print_model_size
 
+        megatron_cfg = self.config.ref.megatron if build_ref or self._is_ref else self.config.actor.megatron
+
         self._init_hf_config_and_tf_config(
             model_path,
             self.config.model.get("tokenizer_path") or model_path,
@@ -371,12 +379,52 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
             override_model_config,
             override_transformer_config,
             self.config.model.get("trust_remote_code", False),
-            self.config.actor.megatron if not self._is_ref else self.config.ref.megatron,
+            megatron_cfg,
         )
         self.generation_config = get_generation_config(
             self.local_path,
             self.config.model.get("trust_remote_code", False),
         )
+
+        if build_ref:
+            wrap_config = McoreModuleWrapperConfig(
+                is_value_model=False,  # ref is not value model
+                share_embeddings_and_output_weights=self.share_embeddings_and_output_weights,
+                wrap_with_ddp=False,
+                use_distributed_optimizer=self.config.ref.megatron.use_distributed_optimizer,
+            )
+            ref_module, updated_tf_config = make_megatron_module(
+                wrap_config=wrap_config,
+                tf_config=self.tf_config,
+                hf_config=self.hf_config,
+                bridge=self.bridge,
+                provider=self.provider,
+                override_model_config=override_model_config,
+            )
+            self.tf_config = updated_tf_config
+            if self.config.ref.load_weight:  # should align with the actor:
+                assert self.config.actor.load_weight == self.config.ref.load_weight
+                print("load ref weight start")
+                if self.config.ref.megatron.use_dist_checkpointing:
+                    load_mcore_dist_weights(
+                        ref_module,
+                        self.config.ref.megatron.dist_checkpointing_path,
+                        is_value_model=False,
+                        prefix=self.config.ref.megatron.dist_checkpointing_prefix,
+                    )
+                else:
+                    if self.bridge is not None:
+                        local_model_path = get_hf_model_path(self.config)
+                        if self.vanilla_bridge:
+                            self.bridge.load_weights(ref_module, local_model_path)
+                        else:
+                            self.bridge.load_hf_weights(ref_module, local_model_path)
+                    else:
+                        load_megatron_gptmodel_weights(
+                            self.config, self.hf_config, ref_module, params_dtype=self.dtype, is_value_model=False
+                        )
+            log_gpu_memory_usage("After ref module init", logger=logger)
+            return ref_module, self.hf_config
 
         if self._is_actor or self._is_rollout:
             wrap_config = McoreModuleWrapperConfig(
@@ -421,46 +469,6 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
             if self.rank == 0:
                 print_model_size(actor_module[0])
             log_gpu_memory_usage("After MegatronPPOActor init", logger=logger)
-        elif self._is_ref:
-            wrap_config = McoreModuleWrapperConfig(
-                is_value_model=False,  # ref is not value model
-                share_embeddings_and_output_weights=self.share_embeddings_and_output_weights,
-                wrap_with_ddp=False,
-                use_distributed_optimizer=self.config.ref.megatron.use_distributed_optimizer,
-            )
-            ref_module, updated_tf_config = make_megatron_module(
-                wrap_config=wrap_config,
-                tf_config=self.tf_config,
-                hf_config=self.hf_config,
-                bridge=self.bridge,
-                provider=self.provider,
-                override_model_config=override_model_config,
-            )
-            self.tf_config = updated_tf_config
-            if self.config.ref.load_weight:  # should align with the actor:
-                assert self.config.actor.load_weight == self.config.ref.load_weight
-                print("load ref weight start")
-                if self.config.ref.megatron.use_dist_checkpointing:
-                    load_mcore_dist_weights(
-                        ref_module,
-                        self.config.ref.megatron.dist_checkpointing_path,
-                        is_value_model=False,
-                        prefix=self.config.ref.megatron.dist_checkpointing_prefix,
-                    )
-                else:
-                    if self.bridge is not None:
-                        local_model_path = get_hf_model_path(self.config)
-                        if self.vanilla_bridge:
-                            self.bridge.load_weights(ref_module, local_model_path)
-                        else:
-                            self.bridge.load_hf_weights(ref_module, local_model_path)
-                    else:
-                        load_megatron_gptmodel_weights(
-                            self.config, self.hf_config, ref_module, params_dtype=self.dtype, is_value_model=False
-                        )
-            log_gpu_memory_usage("After ref module init", logger=logger)
-            return ref_module, self.hf_config
-
         # TODO: add more optimizer args into config
         if self._is_actor:
             optim_config_megatron = init_megatron_optim_config(
@@ -612,6 +620,7 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
                 optim_config=None,
                 override_model_config=override_model_config,
                 override_transformer_config=override_transformer_config,
+                build_ref=True,
             )
             log_gpu_memory_usage("After ref model init", logger=logger)
             self.ref_policy = MegatronPPOActor(
