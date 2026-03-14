@@ -128,3 +128,56 @@ Status:
 - local patch applied and syntax-checked
 - this change must be committed and pushed before the next SkyPilot relaunch, because the
   launcher clones the fork branch on the remote node
+
+### 2026-03-14: Custom Ray head readiness race in launcher
+
+Issue:
+- after pushing the ref-build fix, the next relaunch got through setup and started `main_ppo`
+- it then failed almost immediately with:
+  `Failed to connect to GCS at address 10.0.127.4:6379 within 5 seconds`
+
+What happened:
+- the launcher starts a custom system-Ray head on `127.0.0.1:6379`
+- it then launches `python3 -m verl.trainer.main_ppo` right away
+- `main_ppo` now correctly honors `RAY_ADDRESS=127.0.0.1:6379`, but it can race the new Ray
+  head before GCS is fully ready
+
+Resolution applied:
+- in the head-node branch of the SkyPilot launcher, wait until `ray status` succeeds before
+  launching the trainer
+
+Status:
+- local launcher patch applied
+- no repo code push needed for this step because the YAML itself is launched from the local checkout
+
+### 2026-03-14: Ref offload init bug in colocated Megatron SDPO worker
+
+Issue:
+- after the ref-build fix, the smoke run got deeper into `actor_rollout_ref_init_model`
+- it then failed with:
+  `AttributeError: 'AsyncActorRolloutRefWorker' object has no attribute '_ref_is_offload_param'`
+
+Where it happens:
+- `verl/workers/megatron_workers.py`
+- `ActorRolloutRefWorker.init_model()` reaches:
+  `if self._ref_is_offload_param:`
+- the combined `actor_rollout_ref` worker sets both `self._is_actor` and `self._is_ref`
+- but worker initialization still used `if self._is_actor ... elif self._is_ref ...`
+  in the config-normalization block, so the ref-side branch never ran in the colocated case
+
+Why this matters beyond one missing attribute:
+- the same colocated pattern also meant the ref-side micro-batch normalization was skipped
+- and `init_model()` reused actor transformer overrides when building the ref/teacher model
+
+Resolution applied:
+- initialize `self._ref_is_offload_param = False` unconditionally before normalization
+- change the ref normalization block from `elif self._is_ref` to `if self._is_ref`
+  so actor-side and ref-side setup both run in `actor_rollout_ref`
+- split actor and ref transformer overrides in `init_model()`
+  so the ref build uses `config.ref.megatron.override_transformer_config`
+  instead of inheriting actor-only overrides
+
+Status:
+- local patch applied and syntax-checked
+- this change must be committed and pushed before the next SkyPilot relaunch, because the
+  launcher clones the fork branch on the remote node

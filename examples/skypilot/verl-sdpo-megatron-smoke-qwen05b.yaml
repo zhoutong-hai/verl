@@ -131,6 +131,10 @@ run: |
       --port=6379 \
       --dashboard-host=0.0.0.0 \
       --dashboard-port=8265
+    until ray status >/dev/null 2>&1; do
+      echo "Waiting for custom Ray on 127.0.0.1:6379..."
+      sleep 2
+    done
     cd "$VERL_REPO_DIR"
 
     RUN_TIMESTAMP=$(date +%Y%m%d_%H%M%S)

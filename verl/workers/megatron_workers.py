@@ -328,6 +328,7 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
         self._is_offload_param = False
         self._is_offload_grad = False
         self._is_offload_optimizer = False
+        self._ref_is_offload_param = False
 
         # normalize config
         if self._is_actor:
@@ -342,7 +343,7 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
             self._is_offload_param = self.config.actor.megatron.get("param_offload", False)
             self._is_offload_grad = self.config.actor.megatron.get("grad_offload", False)
             self._is_offload_optimizer = self.config.actor.megatron.get("optimizer_offload", False)
-        elif self._is_ref:
+        if self._is_ref:
             if self.config.ref.get("log_prob_micro_batch_size", None):
                 self.config.ref.log_prob_micro_batch_size //= mpu.get_data_parallel_world_size()
                 self.config.ref.log_prob_micro_batch_size_per_gpu = self.config.ref.log_prob_micro_batch_size
@@ -555,21 +556,22 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
         from verl.utils.torch_dtypes import PrecisionType
 
         override_model_config = OmegaConf.to_container(OmegaConf.create(self.config.model.get("override_config", {})))
+        actor_override_transformer_config = {}
+        ref_override_transformer_config = {}
+        override_ddp_config = None
         if self._is_actor:
-            override_transformer_config = OmegaConf.to_container(
+            actor_override_transformer_config = OmegaConf.to_container(
                 OmegaConf.create(self.config.actor.megatron.get("override_transformer_config", {}))
             )
             if self.enable_routing_replay:
-                override_transformer_config["enable_routing_replay"] = True
+                actor_override_transformer_config["enable_routing_replay"] = True
             override_ddp_config = OmegaConf.to_container(
                 OmegaConf.create(self.config.actor.megatron.get("override_ddp_config", {}))
             )
-        elif self._is_ref:
-            override_transformer_config = OmegaConf.to_container(
+        if self._is_ref:
+            ref_override_transformer_config = OmegaConf.to_container(
                 OmegaConf.create(self.config.ref.megatron.get("override_transformer_config", {}))
             )
-        else:
-            override_transformer_config = {}
         self.param_dtype = PrecisionType.to_dtype(self.config.actor.megatron.dtype)
         log_gpu_memory_usage("Before init actor model and optimizer", logger=logger)
         self.dtype = PrecisionType.to_dtype(self.param_dtype)
@@ -586,7 +588,7 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
                 model_path=self.config.model.path,
                 optim_config=optim_config,
                 override_model_config=override_model_config,
-                override_transformer_config=override_transformer_config,
+                override_transformer_config=actor_override_transformer_config,
                 override_ddp_config=override_ddp_config,
             )
             if self._is_offload_param:
@@ -619,7 +621,7 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
                 model_path=self.config.model.path,
                 optim_config=None,
                 override_model_config=override_model_config,
-                override_transformer_config=override_transformer_config,
+                override_transformer_config=ref_override_transformer_config,
                 build_ref=True,
             )
             log_gpu_memory_usage("After ref model init", logger=logger)
