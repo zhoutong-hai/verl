@@ -1,0 +1,58 @@
+defaults:
+  - ppo_megatron_trainer
+  - _self_
+
+data:
+  train_batch_size: 64
+  train_max_samples: null
+  val_max_samples: null
+  max_prompt_length: 512
+  max_response_length: 256
+  filter_overlong_prompts: true
+  truncation: error
+  return_raw_chat: true
+
+actor_rollout_ref:
+  model:
+    use_remove_padding: true
+    enable_gradient_checkpointing: true
+  actor:
+    optim:
+      lr: 1e-6
+    ppo_mini_batch_size: 64
+    ppo_micro_batch_size_per_gpu: 4
+    use_kl_loss: false
+    megatron:
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+  rollout:
+    name: vllm
+    mode: async
+    tensor_model_parallel_size: 1
+    pipeline_model_parallel_size: 1
+    gpu_memory_utilization: 0.25
+    n: 4
+    log_prob_micro_batch_size_per_gpu: 4
+    calculate_log_probs: true
+  ref:
+    log_prob_micro_batch_size_per_gpu: 4
+    megatron:
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+
+algorithm:
+  adv_estimator: grpo
+  use_kl_in_reward: false
+
+trainer:
+  logger: ["console"]
+  project_name: qwen25_05b_gsm8k_full
+  experiment_name: qwen2_5_0_5b_gsm8k_grpo_megatron_full
+  log_val_generations: 8
+  val_before_train: true
+  n_gpus_per_node: 1
+  nnodes: 1
+  save_freq: 25
+  test_freq: 25
+  total_epochs: 1
+  total_training_steps: null

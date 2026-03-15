@@ -758,7 +758,7 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
 
         metrics["actor/lr"] = get_megatron_last_lr(self.actor_optimizer)
         self.actor_optimizer_scheduler.step(1)
-        self._maybe_update_self_distillation_teacher()
+        metrics.update(self._maybe_update_self_distillation_teacher())
 
         # TODO: here, we should return all metrics
         output = DataProto(meta_info={"metrics": metrics})
@@ -774,16 +774,17 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
         aggressive_empty_cache(force_sync=True)
         return output
 
-    def _maybe_update_self_distillation_teacher(self) -> None:
+    def _maybe_update_self_distillation_teacher(self) -> dict[str, float]:
+        metrics: dict[str, float] = {}
         if not self._is_ref:
-            return
+            return metrics
         loss_mode = self.config.actor.policy_loss.get("loss_mode", "vanilla")
         if loss_mode != "sdpo":
-            return
+            return metrics
 
         sd_cfg = self.config.actor.get("self_distillation", None)
         if sd_cfg is None:
-            return
+            return metrics
 
         teacher_regularization = sd_cfg.get("teacher_regularization", "ema")
         if teacher_regularization != "ema":
@@ -791,19 +792,44 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
 
         update_rate = sd_cfg.get("teacher_update_rate", 0.0)
         if update_rate == 0.0:
-            return
+            return metrics
+
+        metrics["self_distillation/teacher_update_rate"] = float(update_rate)
 
         if self._ref_is_offload_param:
             load_megatron_model_to_gpu(self.ref_module, load_grad=False)
 
         with torch.no_grad():
+            gap_sq_sum = None
+            gap_abs_sum = None
+            param_count = 0
             for ref_chunk, actor_chunk in zip(self.ref_module, self.actor_module, strict=True):
                 for ref_param, actor_param in zip(ref_chunk.parameters(), actor_chunk.parameters(), strict=True):
                     actor_data = actor_param.data.to(device=ref_param.device, dtype=ref_param.dtype)
+                    gap = (actor_data - ref_param.data).float()
+                    gap_sq = gap.square().sum()
+                    gap_abs = gap.abs().sum()
+                    gap_sq_sum = gap_sq if gap_sq_sum is None else gap_sq_sum + gap_sq
+                    gap_abs_sum = gap_abs if gap_abs_sum is None else gap_abs_sum + gap_abs
+                    param_count += gap.numel()
                     ref_param.data.mul_(1.0 - update_rate).add_(actor_data, alpha=update_rate)
+
+        if gap_sq_sum is not None and gap_abs_sum is not None and param_count > 0:
+            teacher_actor_rms_before = torch.sqrt(gap_sq_sum / param_count).item()
+            teacher_actor_abs_before = (gap_abs_sum / param_count).item()
+            metrics["self_distillation/teacher_actor_param_rms_before_update"] = teacher_actor_rms_before
+            metrics["self_distillation/teacher_actor_param_mean_abs_before_update"] = teacher_actor_abs_before
+            metrics["self_distillation/teacher_actor_param_rms_after_update"] = (
+                teacher_actor_rms_before * (1.0 - update_rate)
+            )
+            metrics["self_distillation/teacher_actor_param_mean_abs_after_update"] = (
+                teacher_actor_abs_before * (1.0 - update_rate)
+            )
 
         if self._ref_is_offload_param:
             offload_megatron_model_to_cpu(self.ref_module)
+
+        return metrics
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="rollout"))
     @GPUMemoryLogger(role="generate_sequences", logger=logger)

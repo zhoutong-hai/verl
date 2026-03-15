@@ -1,6 +1,6 @@
 # SDPO Smoke Debug Log
 
-Last updated: 2026-03-14
+Last updated: 2026-03-15
 
 ## Goal
 
@@ -34,18 +34,19 @@ sky launch -c verl-sdpo-smoke /Users/zhoutong/code/verl/examples/skypilot/verl-s
 
 Update this section every time a task completes, a new issue is found, or an old issue is resolved.
 
-- Last checked: 2026-03-14
+- Last checked: 2026-03-15
 - Cluster: `verl-sdpo-smoke`
-- Latest remote task: `8`
-- Branch / pushed commit: `codex/sdpo-megatron-v070` at `3c409cbc`
-- Current run stage reached: task `8` got past setup, trainer initialization, self-distillation batch construction, and into the first actor update
+- Latest remote task: `9`
+- Branch / pushed commit: `codex/sdpo-megatron-v070` at `12d107cc`
+- Current run stage reached:
+  task `9` completed the full 3-step SkyPilot Megatron SDPO smoke run and exited cleanly
 - Current active blocker:
-  Megatron actor SDPO loss path still sees `self_distillation` as a plain dict during the first actor update
+  none for the SDPO smoke path right now
 - Plan status:
-  1. Inspect the latest failure carefully before patching. `completed` for task `7`
+  1. Inspect the latest failure carefully before patching. `completed`
   2. Patch the relevant code or launcher, update this debug log, and do a quick local verification when possible. `completed`
   3. Commit and push repo code changes when the remote node needs to clone the updated branch. `completed`
-  4. Relaunch on SkyPilot, inspect the next outcome, and repeat until the smoke run succeeds or the next blocker is isolated clearly. `in_progress`
+  4. Relaunch on SkyPilot, inspect the next outcome, and repeat until the smoke run succeeds or the next blocker is isolated clearly. `completed`
 - Recent completed milestones:
   - setup passes on the smoke cluster
   - custom Megatron ref build no longer crashes on colocated actor+ref init
@@ -55,9 +56,16 @@ Update this section every time a task completes, a new issue is found, or an old
   - task `8` launched to validate the fix
   - task `8` got past the old `solution_template` crash
   - task `8` reached the first actor update before failing
+  - actor-side normalization fix pushed in `12d107cc`
+  - task `9` launched to validate the first actor update path
+  - task `9` completed step `1` successfully
+  - task `9` completed step `2` successfully
+  - SDPO reprompting became active on task `9` step `2` with non-zero `self_distillation/reprompt_sample_fraction`
+  - the actor-side `self_distillation` dict-vs-dataclass crash is no longer reproducing
+  - task `9` completed step `3` successfully
+  - task `9` exited cleanly and synced W&B run `2xc5al9l`
 - Local workspace state:
   - uncommitted changes in `SDPO_SMOKE_DEBUG_LOG.md`
-  - uncommitted changes in `verl/workers/actor/megatron_actor.py`
 
 ## Debug Notes
 
@@ -300,7 +308,7 @@ Status:
   `solution_template` config error
 - no longer the active blocker
 
-### [WIP] 2026-03-15: Megatron actor SDPO loss still receives nested config as dict
+### [Resolved] 2026-03-15: Megatron actor SDPO loss still receives nested config as dict
 
 Issue:
 - task `8` got past the trainer-side SDPO config mismatch and reached the first actor update
@@ -320,7 +328,7 @@ Root cause:
 - that means the trainer-side normalization fixed the batch-construction path, but the
   first actor update still crashes when it expects attribute access on the nested config
 
-Resolution in progress:
+Resolution:
 - normalize `self.config.self_distillation` through
   `omega_conf_to_dataclass(..., dataclass_type=SelfDistillationConfig)` inside the
   SDPO loss branch before reading `full_logit_distillation`
@@ -328,4 +336,32 @@ Resolution in progress:
 Status:
 - local patch applied
 - `python3 -m compileall verl/workers/actor/megatron_actor.py` passed
-- next step is commit, push, and relaunch task `9`
+- patch committed and pushed in `12d107cc`
+- task `9` got past the first actor update and no longer reproduces the
+  `full_logit_distillation` config error
+- no longer the active blocker
+
+### [Resolved] 2026-03-15: End-to-end SkyPilot Megatron SDPO smoke run
+
+Result:
+- task `9` completed the full smoke run successfully on `verl-sdpo-smoke`
+- the run reached `training/global_step: 3` and exited without traceback
+- the W&B run synced successfully:
+  `qwen25_05b_sdpo_megatron_smoke_sdpo_20260315_001849`
+  (`2xc5al9l`)
+
+What this validates:
+- the SkyPilot launcher, `/hai` mount, and custom Ray startup are all working together
+- Megatron actor + ref/teacher colocated initialization works in SDPO mode
+- trainer-side SDPO teacher-batch construction works
+- Megatron actor SDPO loss runs through real training steps
+- EMA teacher maintenance no longer blocks the smoke path
+
+Observed SDPO signal during the successful run:
+- step `1`: `self_distillation/reprompt_sample_fraction = 0.0`
+- step `2`: `self_distillation/reprompt_sample_fraction = 0.046875`
+- step `3`: `self_distillation/reprompt_sample_fraction = 0.0`
+
+Notes:
+- this is still a smoke test, not a quality benchmark
+- validation accuracy on the tiny 3-step run remained `0.0`, which is not surprising for this setup

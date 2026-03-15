@@ -789,6 +789,12 @@ class RayPPOTrainer:
             feedback_list[i] is not None and (not feedback_only_without_solution or solution_strs[i] is None)
             for i in range(batch_size)
         ]
+        solution_and_feedback_used = [
+            solution_strs[i] is not None and feedback_used[i] for i in range(batch_size)
+        ]
+        feedback_only_used = [
+            solution_strs[i] is None and feedback_used[i] for i in range(batch_size)
+        ]
         self_distillation_mask = torch.tensor(
             [solution_strs[i] is not None or feedback_used[i] for i in range(batch_size)],
             dtype=torch.float32,
@@ -799,6 +805,9 @@ class RayPPOTrainer:
         num_with_feedback_available = sum(1 for item in feedback_list if item is not None)
         num_with_feedback_used = sum(1 for item in feedback_used if item)
         num_with_solution = sum(1 for item in solution_strs if item is not None)
+        num_with_solution_and_feedback = sum(1 for item in solution_and_feedback_used if item)
+        num_with_feedback_only = sum(1 for item in feedback_only_used if item)
+        teacher_prompt_lengths = teacher_prompt["attention_mask"].sum(dim=1).to(torch.float32)
         metrics = {
             "self_distillation/success_group_fraction": len([uid for uid in uids if len(success_by_uid[uid]) > 0])
             / len(uids),
@@ -806,6 +815,11 @@ class RayPPOTrainer:
             "self_distillation/feedback_available_fraction": num_with_feedback_available / batch_size,
             "self_distillation/feedback_used_fraction": num_with_feedback_used / batch_size,
             "self_distillation/reprompt_sample_fraction": self_distillation_mask.float().mean().item(),
+            "self_distillation/solution_used_fraction": num_with_solution / batch_size,
+            "self_distillation/solution_and_feedback_fraction": num_with_solution_and_feedback / batch_size,
+            "self_distillation/feedback_only_fraction": num_with_feedback_only / batch_size,
+            "self_distillation/teacher_prompt_length_mean": teacher_prompt_lengths.mean().item(),
+            "self_distillation/teacher_prompt_length_max": teacher_prompt_lengths.max().item(),
         }
         return (
             DataProto.from_dict(

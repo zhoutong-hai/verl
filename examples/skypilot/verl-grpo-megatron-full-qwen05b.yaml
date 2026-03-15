@@ -1,0 +1,182 @@
+envs:
+  RUN_NAME_PREFIX: qwen25_05b_grpo_megatron_full
+  VERL_GIT_URL: https://github.com/zhoutong-hai/verl.git
+  VERL_GIT_BRANCH: codex/sdpo-megatron-v070
+  VERL_REPO_DIR: /root/verl-qwen05b-full
+  TRAIN_FILE: /hai/zhoutong/sdpo_megatron_smoke_qwen25_05b/data/gsm8k/train.parquet
+  VAL_FILE: /hai/zhoutong/sdpo_megatron_smoke_qwen25_05b/data/gsm8k/test.parquet
+  MODEL_PATH: /hai/zhoutong/sdpo_megatron_smoke_qwen25_05b/models/Qwen2.5-0.5B-Instruct
+  VARIANT: grpo
+  WANDB_PROJECT: main_models_zhoutong
+  WANDB_ENTITY: hippocraticai
+  WANDB_EXP_NAME: <placeholder>
+  TRAIN_TP_SIZE: "2"
+  TRAIN_PP_SIZE: "1"
+  ROLLOUT_TP_SIZE: "2"
+  ROLLOUT_PP_SIZE: "1"
+  ACTOR_PPO_MICRO_BATCH_SIZE_PER_GPU: "4"
+  ROLLOUT_LOG_PROB_MICRO_BATCH_SIZE_PER_GPU: "4"
+  REF_LOG_PROB_MICRO_BATCH_SIZE_PER_GPU: "4"
+  CUDA_DEVICE_MAX_CONNECTIONS: "1"
+  VLLM_USE_V1: "1"
+  VLLM_ALLREDUCE_USE_SYMM_MEM: "0"
+  VLLM_USE_NCCL_SYMM_MEM: "0"
+  VLLM_ENABLE_PREFIX_CACHING: "1"
+  HF_HUB_ENABLE_HF_TRANSFER: "1"
+  HF_HUB_DISABLE_SYMLINKS_WARNING: "1"
+  NVTE_FUSED_ATTN: "0"
+  NVTE_FLASH_ATTN: "1"
+
+resources:
+  infra: k8s/hai-training
+  accelerators: H200:8
+  memory: 128+
+  image_id: docker:verlai/verl:app-verl0.5-transformers4.55.4-vllm0.10.0-mcore0.13.0-te2.2
+  ports: 8265
+
+secrets:
+  WANDB_API_KEY:
+
+num_nodes: 1
+
+config:
+  kubernetes:
+    pod_config:
+      spec:
+        containers:
+          - volumeMounts:
+              - mountPath: /hai/
+                name: hai
+        volumes:
+          - name: hai
+            persistentVolumeClaim:
+              claimName: hai
+              readOnly: false
+
+setup: |
+  pkill -f '/tmp/ray/session_' || true
+  sleep 2
+
+  rm -rf "$VERL_REPO_DIR"
+  git clone --branch "$VERL_GIT_BRANCH" "$VERL_GIT_URL" "$VERL_REPO_DIR"
+  cd "$VERL_REPO_DIR"
+  pip3 install --upgrade pip
+
+  sed -i '/enable_log_requests=/d' \
+    verl/workers/rollout/vllm_rollout/vllm_async_server.py || true
+  sed -i '/stat_loggers=/d' \
+    verl/workers/rollout/vllm_rollout/vllm_async_server.py || true
+
+  pip3 install -v -e .[vllm]
+  python3 -c "import verl; import pathlib; print(pathlib.Path(verl.__file__).resolve())"
+
+  pip3 install --upgrade "nvidia-modelopt[torch]==0.40.0"
+  pip3 install --upgrade "megatron-core==0.15.0"
+  pip3 install --upgrade "transformers==4.57.1"
+  pip3 install --no-deps "git+https://github.com/NVIDIA-NeMo/Megatron-Bridge.git@v0.2.2"
+
+  python3 -c "import subprocess,re;from pathlib import Path;loc=subprocess.run(['pip3','show','megatron-bridge'],capture_output=True,text=True).stdout;m=re.search(r'Location: (.+)',loc);site=Path(m.group(1).strip()) if m else None;gpt=site/'megatron/bridge/models/gpt_provider.py' if site else None;c=gpt.read_text() if gpt and gpt.exists() else '';old='import modelopt.torch.distill as mtd\\nimport modelopt.torch.distill.plugins.megatron as mtd_mcore';new='try:\\n    import modelopt.torch.distill as mtd\\n    import modelopt.torch.distill.plugins.megatron as mtd_mcore\\nexcept ImportError:\\n    mtd = None\\n    mtd_mcore = None';c=c.replace(old,new) if old in c else c;gpt.write_text(c) if c and 'mtd_mcore = None' not in gpt.read_text() else None;print(f'Patched {gpt}') if c else print('No patch needed')"
+
+  test -f "$VERL_REPO_DIR/pyproject.toml"
+  test -f "$TRAIN_FILE"
+  test -f "$VAL_FILE"
+  test -f "$MODEL_PATH/config.json"
+  test -f "$MODEL_PATH/model.safetensors"
+
+run: |
+  set -euo pipefail
+  cd "$VERL_REPO_DIR"
+  export CUDA_DEVICE_MAX_CONNECTIONS=1
+  export VLLM_ALLREDUCE_USE_SYMM_MEM=0
+  export VLLM_USE_NCCL_SYMM_MEM=0
+  export TORCH_SYMM_MEM_ALLOW_OVERLAPPING_DEVICES=0
+  export VLLM_ENABLE_PREFIX_CACHING=1
+  export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  export RAY_DATA_HOME="${HOME}/verl"
+  export HF_HOME=/tmp/huggingface_cache
+  export WANDB_PROJECT="$WANDB_PROJECT"
+  export WANDB_ENTITY="$WANDB_ENTITY"
+  export RAY_ADDRESS=127.0.0.1:6379
+  mkdir -p "$HF_HOME"
+
+  HEAD_IP=$(echo "$SKYPILOT_NODE_IPS" | head -n1)
+  NUM_NODES=${SKYPILOT_NUM_NODES:-1}
+  NUM_GPUS_PER_NODE=${SKYPILOT_NUM_GPUS_PER_NODE:-1}
+  TRAIN_TP_SIZE=${TRAIN_TP_SIZE:-1}
+  TRAIN_PP_SIZE=${TRAIN_PP_SIZE:-1}
+  ROLLOUT_TP_SIZE=${ROLLOUT_TP_SIZE:-1}
+  ROLLOUT_PP_SIZE=${ROLLOUT_PP_SIZE:-1}
+
+  if (( NUM_GPUS_PER_NODE % TRAIN_TP_SIZE != 0 )); then
+    echo "NUM_GPUS_PER_NODE=$NUM_GPUS_PER_NODE must be divisible by TRAIN_TP_SIZE=$TRAIN_TP_SIZE"
+    exit 1
+  fi
+
+  if (( NUM_GPUS_PER_NODE % ROLLOUT_TP_SIZE != 0 )); then
+    echo "NUM_GPUS_PER_NODE=$NUM_GPUS_PER_NODE must be divisible by ROLLOUT_TP_SIZE=$ROLLOUT_TP_SIZE"
+    exit 1
+  fi
+
+  if [ "$SKYPILOT_NODE_RANK" == "0" ]; then
+    echo "Starting Ray head node..."
+    cd /root
+    if ! ray status --address="$RAY_ADDRESS" >/dev/null 2>&1; then
+      pkill -f '/tmp/ray/session_' || true
+      sleep 2
+      ray start --head --disable-usage-stats \
+        --port=6379 \
+        --dashboard-host=0.0.0.0 \
+        --dashboard-port=8265
+    fi
+    until ray status --address="$RAY_ADDRESS" >/dev/null 2>&1; do
+      echo "Waiting for custom Ray on 127.0.0.1:6379..."
+      sleep 2
+    done
+    cd "$VERL_REPO_DIR"
+
+    RUN_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+    CONFIG_NAME="grpo_megatron_gsm8k_full_trainer.yaml"
+    DEFAULT_EXP_NAME="qwen2_5_0_5b_gsm8k_grpo_megatron_full"
+
+    if [ -n "${WANDB_API_KEY:-}" ]; then
+      python3 -c "import wandb; wandb.login(relogin=True, key='$WANDB_API_KEY')"
+    fi
+
+    if [ -z "${WANDB_EXP_NAME:-}" ] || [ "$WANDB_EXP_NAME" = "<placeholder>" ]; then
+      EXPERIMENT_NAME="${RUN_NAME_PREFIX}_${VARIANT}_${RUN_TIMESTAMP}"
+    else
+      EXPERIMENT_NAME="$WANDB_EXP_NAME"
+    fi
+
+    python3 -m verl.trainer.main_ppo \
+      --config-path="$VERL_REPO_DIR/verl/trainer/config" \
+      --config-name="$CONFIG_NAME" \
+      data.train_files="['$TRAIN_FILE']" \
+      data.val_files="['$VAL_FILE']" \
+      actor_rollout_ref.model.path="$MODEL_PATH" \
+      actor_rollout_ref.actor.megatron.use_mbridge=True \
+      actor_rollout_ref.actor.megatron.vanilla_mbridge=False \
+      trainer.logger='[console,wandb]' \
+      trainer.project_name="$WANDB_PROJECT" \
+      trainer.experiment_name="$EXPERIMENT_NAME" \
+      trainer.n_gpus_per_node="$NUM_GPUS_PER_NODE" \
+      trainer.nnodes="$NUM_NODES" \
+      actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu="$ACTOR_PPO_MICRO_BATCH_SIZE_PER_GPU" \
+      actor_rollout_ref.actor.megatron.pipeline_model_parallel_size="$TRAIN_PP_SIZE" \
+      actor_rollout_ref.actor.megatron.tensor_model_parallel_size="$TRAIN_TP_SIZE" \
+      actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu="$ROLLOUT_LOG_PROB_MICRO_BATCH_SIZE_PER_GPU" \
+      actor_rollout_ref.rollout.pipeline_model_parallel_size="$ROLLOUT_PP_SIZE" \
+      actor_rollout_ref.rollout.tensor_model_parallel_size="$ROLLOUT_TP_SIZE" \
+      actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu="$REF_LOG_PROB_MICRO_BATCH_SIZE_PER_GPU" \
+      actor_rollout_ref.ref.megatron.pipeline_model_parallel_size="$TRAIN_PP_SIZE" \
+      actor_rollout_ref.ref.megatron.tensor_model_parallel_size="$TRAIN_TP_SIZE"
+  else
+    sleep 15
+    echo "Starting Ray worker node..."
+    cd /root
+    ps aux | grep ray | grep $HEAD_IP:6379 &> /dev/null || ray start --address $HEAD_IP:6379 --disable-usage-stats
+    cd "$VERL_REPO_DIR"
+    sleep 10
+  fi
+
+  echo "SkyPilot full run finished for rank $SKYPILOT_NODE_RANK."
