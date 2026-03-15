@@ -73,11 +73,15 @@ bash /Users/zhoutong/code/verl/examples/sdpo_trainer/run_qwen3_8b_sciknoweval_ch
 - Chemistry assets are staged on `model-eval` under `/hai/zhoutong/section3_chemistry_assets/`.
 - A SkyPilot launcher has been updated to use the staged `/hai/zhoutong` model and dataset paths directly.
 - Chemistry launcher changes were pushed to `codex/sdpo-megatron-v070` in commit `702ffe84`.
-- The first live run is the on-policy `grpo_fsdp` baseline on cluster `model-eval`.
+- The first live run is the on-policy `grpo_fsdp` baseline on cluster `verl-qwen3-chemistry-grpo`.
 - The first launch attempt hit a SkyPilot resource mismatch because `model-eval` was already up with a different image, so the cluster was recreated before relaunch.
 - The recreated `model-eval` cluster successfully reached setup and started job `1`.
 - Job `1` failed in trainer config resolution because the chemistry trainer YAMLs expected `CHEMISTRY_TRAIN_FILE` / `CHEMISTRY_VAL_FILE` in the environment.
 - The trainer configs have now been patched to derive parquet paths directly from `CHEMISTRY_DATA_DIR`, which is already exported by the SkyPilot launcher.
+- The parquet-path fix was pushed to `codex/sdpo-megatron-v070` in commit `ca9f631a`.
+- A fresh-cluster relaunch on `verl-qwen3-chemistry-grpo` is now past provisioning, with setup detached and job `1` started.
+- The fresh-cluster relaunch got through setup, Ray startup, and trainer config validation before failing in custom reward-function loading.
+- The chemistry trainer configs have now been patched to use `${oc.env:VERL_REPO_DIR}/verl/utils/reward_score/feedback/__init__.py` for the reward function path.
 - The staged remote model path is `/hai/zhoutong/section3_chemistry_assets/models/Qwen3-8B-Base`, backed by the existing cached checkpoint under `/hai/zhoutong/.modelscope_cache/models/Qwen/Qwen3-8B-Base`.
 - The staged remote dataset path is `/hai/zhoutong/section3_chemistry_assets/data/sciknoweval_chemistry`.
 - Python syntax and YAML parsing checks passed locally.
@@ -147,4 +151,15 @@ bash /Users/zhoutong/code/verl/examples/sdpo_trainer/run_qwen3_8b_sciknoweval_ch
 ### [WIP] Relaunch the first GRPO baseline on a fresh cluster name
 
 - Per the current execution preference, the next launch should use a new cluster name instead of reusing `model-eval`.
-- The relaunch should happen after the `CHEMISTRY_DATA_DIR`-based config fix is committed and pushed.
+- The `CHEMISTRY_DATA_DIR`-based config fix has been committed and pushed.
+- Fresh-cluster relaunch target: `verl-qwen3-chemistry-grpo`.
+- Current state: cluster is up, and the next relaunch on `verl-qwen3-chemistry-grpo` should pick up the absolute reward-path fix.
+
+### [Resolved] Fresh-cluster GRPO run reached reward setup before failing on a repo-relative custom reward path
+
+- The first run on `verl-qwen3-chemistry-grpo` got past the earlier `CHEMISTRY_TRAIN_FILE` interpolation issue.
+- It then failed with:
+  `FileNotFoundError: Custom module file not found: module_path='verl/utils/reward_score/feedback/__init__.py'`
+- Root cause: the reward loader expects a real filesystem path, not a repo-relative string.
+- Fix: update all three chemistry trainer configs to use
+  `${oc.env:VERL_REPO_DIR}/verl/utils/reward_score/feedback/__init__.py`.

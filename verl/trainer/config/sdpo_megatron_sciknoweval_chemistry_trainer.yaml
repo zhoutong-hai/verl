@@ -74,7 +74,7 @@ algorithm:
     rollout_is_threshold: 2.0
 
 custom_reward_function:
-  path: verl/utils/reward_score/feedback/__init__.py
+  path: ${oc.env:VERL_REPO_DIR}/verl/utils/reward_score/feedback/__init__.py
 
 trainer:
   project_name: qwen3_8b_section3_chemistry
