@@ -72,7 +72,7 @@ It clones `https://github.com/zhoutong-hai/verl.git` on branch `codex/sdpo-megat
 ```bash
 sky launch -c verl-qwen3-chemistry examples/skypilot/verl-qwen3-section3-chemistry.yaml --secret WANDB_API_KEY -y
 ```
-Runs the Section 3 Chemistry pilot for `Qwen/Qwen3-8B` from the same branch. The YAML mounts the local Chemistry dataset directory, clones the fork branch, and uses `envs.VARIANT` to switch among `grpo_fsdp`, `sdpo_fsdp`, and `sdpo_megatron`.
+Runs the Section 3 Chemistry pilot for `Qwen/Qwen3-8B` from the same branch. The YAML now expects pre-staged assets on the node under `/hai/zhoutong/section3_chemistry_assets/`, clones the fork branch, and uses `envs.VARIANT` to switch among `grpo_fsdp`, `sdpo_fsdp`, and `sdpo_megatron`.
 
 ### Multi-turn Tool Usage Training
 ```bash

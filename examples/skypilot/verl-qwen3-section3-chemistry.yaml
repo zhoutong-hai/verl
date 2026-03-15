@@ -3,8 +3,8 @@ envs:
   VERL_GIT_URL: https://github.com/zhoutong-hai/verl.git
   VERL_GIT_BRANCH: codex/sdpo-megatron-v070
   VERL_REPO_DIR: /root/verl-section3-chemistry
-  CHEMISTRY_DATA_DIR: /root/chemistry-data
-  MODEL_PATH: Qwen/Qwen3-8B
+  CHEMISTRY_DATA_DIR: /hai/zhoutong/section3_chemistry_assets/data/sciknoweval_chemistry
+  MODEL_PATH: /hai/zhoutong/section3_chemistry_assets/models/Qwen3-8B-Base
   VARIANT: grpo_fsdp
   WANDB_PROJECT: main_models_zhoutong
   WANDB_ENTITY: hippocraticai
@@ -33,9 +33,6 @@ resources:
   ports: 8265
 
 num_nodes: 1
-
-file_mounts:
-  /root/chemistry-data: /Users/zhoutong/code/SDPO/datasets/sciknoweval/chemistry
 
 secrets:
   WANDB_API_KEY:
@@ -83,6 +80,7 @@ setup: |
   test -f "$VERL_REPO_DIR/pyproject.toml"
   test -f "$CHEMISTRY_DATA_DIR/train.json"
   test -f "$CHEMISTRY_DATA_DIR/test.json"
+  test -f "$MODEL_PATH/config.json"
 
 run: |
   set -euo pipefail

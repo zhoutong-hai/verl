@@ -70,10 +70,13 @@ bash /Users/zhoutong/code/verl/examples/sdpo_trainer/run_qwen3_8b_sciknoweval_ch
 - Upstream-style FSDP SDPO actor path has been integrated into this branch.
 - Trainer now supports choosing actor-side teacher scoring for the original FSDP SDPO path.
 - Chemistry-specific configs and a single run script have been added.
-- A SkyPilot launcher has been added for the Chemistry pilot.
+- Chemistry assets are staged on `model-eval` under `/hai/zhoutong/section3_chemistry_assets/`.
+- A SkyPilot launcher has been updated to use the staged `/hai/zhoutong` model and dataset paths directly.
+- The staged remote model path is `/hai/zhoutong/section3_chemistry_assets/models/Qwen3-8B-Base`, backed by the existing cached checkpoint under `/hai/zhoutong/.modelscope_cache/models/Qwen/Qwen3-8B-Base`.
+- The staged remote dataset path is `/hai/zhoutong/section3_chemistry_assets/data/sciknoweval_chemistry`.
 - Python syntax and YAML parsing checks passed locally.
 - Full Hydra config rendering has not been validated locally because the desktop Python env is missing `packaging`.
-- Chemistry pilot has not been launched yet from this branch.
+- Next launch target is the on-policy `grpo_fsdp` baseline on the updated SkyPilot path.
 
 ## Debug Notes
 
@@ -103,12 +106,18 @@ bash /Users/zhoutong/code/verl/examples/sdpo_trainer/run_qwen3_8b_sciknoweval_ch
 ### [Resolved] Added a single-node SkyPilot launcher for the Chemistry pilot
 
 - Added [verl-qwen3-section3-chemistry.yaml](/Users/zhoutong/code/verl/examples/skypilot/verl-qwen3-section3-chemistry.yaml).
-- The launcher mounts the local Chemistry dataset directory, clones this fork branch, and can switch among `grpo_fsdp`, `sdpo_fsdp`, and `sdpo_megatron` through `envs.VARIANT`.
+- The launcher now uses the pre-staged remote assets under `/hai/zhoutong/section3_chemistry_assets/`, clones this fork branch, and can switch among `grpo_fsdp`, `sdpo_fsdp`, and `sdpo_megatron` through `envs.VARIANT`.
+
+### [Resolved] Staged the Chemistry model and dataset on `model-eval`
+
+- Staged `train.json` and `test.json` under `/hai/zhoutong/section3_chemistry_assets/data/sciknoweval_chemistry`.
+- Verified the existing cached Qwen3 base checkpoint under `/hai/zhoutong/.modelscope_cache/models/Qwen/Qwen3-8B-Base`.
+- Exposed a stable experiment model path at `/hai/zhoutong/section3_chemistry_assets/models/Qwen3-8B-Base` via symlink, so the launch no longer depends on a runtime Hugging Face download.
 
 ### [WIP] Validate config composition and launch the first Chemistry run
 
-- Next check is local config sanity and syntax validation.
-- After that, the first pilot launch should be the on-policy GRPO FSDP baseline.
+- Local script syntax and SkyPilot YAML parsing passed.
+- The next live step is launching the on-policy GRPO FSDP baseline from the updated SkyPilot path.
 
 ### [WIP] Local Hydra render is blocked by desktop env dependencies
 

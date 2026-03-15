@@ -6,8 +6,26 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
 
 VARIANT="${VARIANT:-grpo_fsdp}"
-MODEL_PATH="${MODEL_PATH:-Qwen/Qwen3-8B}"
-CHEMISTRY_DATA_DIR="${CHEMISTRY_DATA_DIR:-/Users/zhoutong/code/SDPO/datasets/sciknoweval/chemistry}"
+REMOTE_MODEL_PATH="/hai/zhoutong/section3_chemistry_assets/models/Qwen3-8B-Base"
+REMOTE_CHEMISTRY_DATA_DIR="/hai/zhoutong/section3_chemistry_assets/data/sciknoweval_chemistry"
+LOCAL_CHEMISTRY_DATA_DIR="/Users/zhoutong/code/SDPO/datasets/sciknoweval/chemistry"
+
+if [[ -z "${MODEL_PATH:-}" ]]; then
+  if [[ -f "$REMOTE_MODEL_PATH/config.json" ]]; then
+    MODEL_PATH="$REMOTE_MODEL_PATH"
+  else
+    MODEL_PATH="Qwen/Qwen3-8B"
+  fi
+fi
+
+if [[ -z "${CHEMISTRY_DATA_DIR:-}" ]]; then
+  if [[ -f "$REMOTE_CHEMISTRY_DATA_DIR/train.json" && -f "$REMOTE_CHEMISTRY_DATA_DIR/test.json" ]]; then
+    CHEMISTRY_DATA_DIR="$REMOTE_CHEMISTRY_DATA_DIR"
+  else
+    CHEMISTRY_DATA_DIR="$LOCAL_CHEMISTRY_DATA_DIR"
+  fi
+fi
+
 CHEMISTRY_TRAIN_FILE="${CHEMISTRY_TRAIN_FILE:-$CHEMISTRY_DATA_DIR/train.parquet}"
 CHEMISTRY_VAL_FILE="${CHEMISTRY_VAL_FILE:-$CHEMISTRY_DATA_DIR/test.parquet}"
 N_GPUS_PER_NODE="${N_GPUS_PER_NODE:-8}"
