@@ -40,7 +40,8 @@ from verl.utils.torch_dtypes import PrecisionType
 from verl.utils.torch_functional import logprobs_from_logits
 from verl.utils.ulysses import gather_outputs_and_unpad, slice_input_tensor, ulysses_pad, ulysses_pad_and_slice_inputs
 from verl.workers.actor import BasePPOActor
-from verl.workers.config import ActorConfig
+from verl.utils.config import omega_conf_to_dataclass
+from verl.workers.config import ActorConfig, SelfDistillationConfig
 
 __all__ = ["DataParallelPPOActor"]
 
@@ -134,6 +135,10 @@ class DataParallelPPOActor(BasePPOActor):
         loss_mode = self.config.policy_loss.get("loss_mode", "vanilla")
         if not self_distillation_cfg or loss_mode != "sdpo":
             return
+        self_distillation_cfg = omega_conf_to_dataclass(
+            self_distillation_cfg,
+            dataclass_type=SelfDistillationConfig,
+        )
         teacher_regularization = getattr(self_distillation_cfg, "teacher_regularization", "ema")
         if teacher_regularization != "ema":
             return
@@ -684,6 +689,12 @@ class DataParallelPPOActor(BasePPOActor):
         self_distillation_enabled = loss_mode == "sdpo"
         self_distillation_cfg = getattr(self.config, "self_distillation", None)
         if self_distillation_enabled:
+            if self_distillation_cfg is None:
+                raise ValueError("loss_mode='sdpo' requires actor.self_distillation config.")
+            self_distillation_cfg = omega_conf_to_dataclass(
+                self_distillation_cfg,
+                dataclass_type=SelfDistillationConfig,
+            )
             self_distillation_required_keys = {
                 "teacher_input_ids",
                 "teacher_attention_mask",

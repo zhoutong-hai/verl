@@ -29,25 +29,58 @@ python3 /Users/zhoutong/code/verl/examples/data_preprocess/sdpo_generalization.p
   --data_source /Users/zhoutong/code/SDPO/datasets/sciknoweval/chemistry
 ```
 
-### GRPO FSDP baseline
+### Local: GRPO FSDP baseline
 
 ```bash
 VARIANT=grpo_fsdp \
 bash /Users/zhoutong/code/verl/examples/sdpo_trainer/run_qwen3_8b_sciknoweval_chemistry_section3.sh
 ```
 
-### SDPO FSDP original-style variant
+### Local: SDPO FSDP original-style variant
 
 ```bash
 VARIANT=sdpo_fsdp \
 bash /Users/zhoutong/code/verl/examples/sdpo_trainer/run_qwen3_8b_sciknoweval_chemistry_section3.sh
 ```
 
-### SDPO Megatron variant
+### Local: SDPO Megatron variant
 
 ```bash
 VARIANT=sdpo_megatron \
 bash /Users/zhoutong/code/verl/examples/sdpo_trainer/run_qwen3_8b_sciknoweval_chemistry_section3.sh
+```
+
+### SkyPilot: GRPO FSDP baseline
+
+```bash
+source /Users/zhoutong/code/skypilot-infra/.venv/bin/activate
+export WANDB_API_KEY='***'
+sky launch -c verl-qwen3-chemistry-grpo \
+  /Users/zhoutong/code/verl/examples/skypilot/verl-qwen3-section3-chemistry.yaml \
+  --env VARIANT=grpo_fsdp \
+  --secret WANDB_API_KEY -y
+```
+
+### SkyPilot: SDPO FSDP original-style variant
+
+```bash
+source /Users/zhoutong/code/skypilot-infra/.venv/bin/activate
+export WANDB_API_KEY='***'
+sky launch -c verl-qwen3-chemistry-sdpo \
+  /Users/zhoutong/code/verl/examples/skypilot/verl-qwen3-section3-chemistry.yaml \
+  --env VARIANT=sdpo_fsdp \
+  --secret WANDB_API_KEY -y
+```
+
+### SkyPilot: SDPO Megatron variant
+
+```bash
+source /Users/zhoutong/code/skypilot-infra/.venv/bin/activate
+export WANDB_API_KEY='***'
+sky launch -c verl-qwen3-chemistry-sdpo-megatron \
+  /Users/zhoutong/code/verl/examples/skypilot/verl-qwen3-section3-chemistry.yaml \
+  --env VARIANT=sdpo_megatron \
+  --secret WANDB_API_KEY -y
 ```
 
 ## Monitoring Metrics
@@ -82,11 +115,14 @@ bash /Users/zhoutong/code/verl/examples/sdpo_trainer/run_qwen3_8b_sciknoweval_ch
 - A fresh-cluster relaunch on `verl-qwen3-chemistry-grpo` is now past provisioning, with setup detached and job `1` started.
 - The fresh-cluster relaunch got through setup, Ray startup, and trainer config validation before failing in custom reward-function loading.
 - The chemistry trainer configs have now been patched to use `${oc.env:VERL_REPO_DIR}/verl/utils/reward_score/feedback/__init__.py` for the reward function path.
+- The reward-path fix was pushed to `codex/sdpo-megatron-v070` in commit `8f72ea6b`.
 - The staged remote model path is `/hai/zhoutong/section3_chemistry_assets/models/Qwen3-8B-Base`, backed by the existing cached checkpoint under `/hai/zhoutong/.modelscope_cache/models/Qwen/Qwen3-8B-Base`.
 - The staged remote dataset path is `/hai/zhoutong/section3_chemistry_assets/data/sciknoweval_chemistry`.
-- Python syntax and YAML parsing checks passed locally.
-- Full Hydra config rendering has not been validated locally because the desktop Python env is missing `packaging`.
-- Current focus is pushing the config fix and relaunching the first GRPO baseline on a fresh cluster name so `model-eval` can remain available.
+- Both `verl-qwen3-chemistry-grpo` and `verl-qwen3-chemistry-sdpo` clusters were launched.
+- `verl-qwen3-chemistry-grpo` is running (status to be checked).
+- `verl-qwen3-chemistry-sdpo` failed in the first actor update with `AttributeError: 'dict' object has no attribute 'full_logit_distillation'` — same dict-vs-dataclass bug as the Megatron smoke fix.
+- Fix applied locally in `dp_actor.py`: normalize `self_distillation_cfg` through `omega_conf_to_dataclass` in both `update_policy()` and `_update_teacher()`.
+- Current focus: commit, push, and relaunch SDPO on `verl-qwen3-chemistry-sdpo`.
 
 ## Debug Notes
 
@@ -148,12 +184,12 @@ bash /Users/zhoutong/code/verl/examples/sdpo_trainer/run_qwen3_8b_sciknoweval_ch
 - `python3 -m verl.trainer.main_ppo --cfg job` currently fails locally with `ModuleNotFoundError: No module named 'packaging'`.
 - This is a local environment issue on the desktop Python, not a syntax error in the branch.
 
-### [WIP] Relaunch the first GRPO baseline on a fresh cluster name
+### [Resolved] Relaunch the first GRPO baseline on a fresh cluster name
 
 - Per the current execution preference, the next launch should use a new cluster name instead of reusing `model-eval`.
 - The `CHEMISTRY_DATA_DIR`-based config fix has been committed and pushed.
 - Fresh-cluster relaunch target: `verl-qwen3-chemistry-grpo`.
-- Current state: cluster is up, and the next relaunch on `verl-qwen3-chemistry-grpo` should pick up the absolute reward-path fix.
+- Both `verl-qwen3-chemistry-grpo` and `verl-qwen3-chemistry-sdpo` clusters were launched.
 
 ### [Resolved] Fresh-cluster GRPO run reached reward setup before failing on a repo-relative custom reward path
 
@@ -163,3 +199,26 @@ bash /Users/zhoutong/code/verl/examples/sdpo_trainer/run_qwen3_8b_sciknoweval_ch
 - Root cause: the reward loader expects a real filesystem path, not a repo-relative string.
 - Fix: update all three chemistry trainer configs to use
   `${oc.env:VERL_REPO_DIR}/verl/utils/reward_score/feedback/__init__.py`.
+
+### [WIP] FSDP SDPO actor crashes on dict attribute access for self_distillation config
+
+- The SDPO FSDP run on `verl-qwen3-chemistry-sdpo` failed in the first actor update with:
+  `AttributeError: 'dict' object has no attribute 'full_logit_distillation'`
+- Failing file: `verl/workers/actor/dp_actor.py`, line 778 in `update_policy()`.
+- Failing line:
+  `return_all_logps = self_distillation_cfg.full_logit_distillation and not self_distillation_cfg.distillation_topk`
+- Root cause: identical to the Megatron actor bug fixed in the smoke test (commit `12d107cc`).
+  The nested `self_distillation` config arrives as a plain Python `dict` from Hydra/OmegaConf
+  resolution, but `dp_actor.py` uses dot-notation attribute access expecting a `SelfDistillationConfig`
+  dataclass.
+- The Megatron actor path (`megatron_actor.py`) was already fixed by normalizing through
+  `omega_conf_to_dataclass(..., dataclass_type=SelfDistillationConfig)`, but the FSDP actor path
+  (`dp_actor.py`) was never exercised in the smoke test and still had the raw dict.
+- Fix applied in `dp_actor.py`:
+  1. Added imports for `omega_conf_to_dataclass` and `SelfDistillationConfig`.
+  2. Normalized `self_distillation_cfg` through `omega_conf_to_dataclass` in `update_policy()`
+     before any dot-notation access.
+  3. Applied the same normalization in `_update_teacher()` to prevent silent fallback to defaults
+     when the config is a plain dict.
+- `python3 -m py_compile verl/workers/actor/dp_actor.py` passed.
+- Remaining: commit, push, and relaunch `verl-qwen3-chemistry-sdpo`.
