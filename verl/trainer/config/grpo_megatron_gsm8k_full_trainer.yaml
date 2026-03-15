@@ -4,8 +4,8 @@ defaults:
 
 data:
   train_batch_size: 64
-  train_max_samples: null
-  val_max_samples: null
+  train_max_samples: -1
+  val_max_samples: -1
   max_prompt_length: 512
   max_response_length: 256
   filter_overlong_prompts: true
