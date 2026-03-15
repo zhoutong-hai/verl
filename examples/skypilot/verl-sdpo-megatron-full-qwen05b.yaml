@@ -73,7 +73,16 @@ setup: |
   pip3 install --upgrade "nvidia-modelopt[torch]==0.40.0"
   pip3 install --upgrade "megatron-core==0.15.0"
   pip3 install --upgrade "transformers==4.57.1"
-  pip3 install --no-deps "git+https://github.com/NVIDIA-NeMo/Megatron-Bridge.git@v0.2.2"
+  for attempt in 1 2 3; do
+    if pip3 install --no-deps "git+https://github.com/NVIDIA-NeMo/Megatron-Bridge.git@v0.2.2"; then
+      break
+    fi
+    if [ "$attempt" -eq 3 ]; then
+      echo "Megatron-Bridge install failed after ${attempt} attempts"
+      exit 1
+    fi
+    sleep 10
+  done
 
   python3 -c "import subprocess,re;from pathlib import Path;loc=subprocess.run(['pip3','show','megatron-bridge'],capture_output=True,text=True).stdout;m=re.search(r'Location: (.+)',loc);site=Path(m.group(1).strip()) if m else None;gpt=site/'megatron/bridge/models/gpt_provider.py' if site else None;c=gpt.read_text() if gpt and gpt.exists() else '';old='import modelopt.torch.distill as mtd\\nimport modelopt.torch.distill.plugins.megatron as mtd_mcore';new='try:\\n    import modelopt.torch.distill as mtd\\n    import modelopt.torch.distill.plugins.megatron as mtd_mcore\\nexcept ImportError:\\n    mtd = None\\n    mtd_mcore = None';c=c.replace(old,new) if old in c else c;gpt.write_text(c) if c and 'mtd_mcore = None' not in gpt.read_text() else None;print(f'Patched {gpt}') if c else print('No patch needed')"
 
