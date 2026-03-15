@@ -64,7 +64,7 @@ from verl.utils.rollout_skip import RolloutSkip
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
-from verl.workers.config import FSDPEngineConfig
+from verl.workers.config import FSDPEngineConfig, SelfDistillationConfig
 from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
 
 
@@ -683,10 +683,14 @@ class RayPPOTrainer:
         reward_tensor: torch.Tensor,
         reward_extra_infos_dict: Optional[dict[str, list]] = None,
     ) -> Optional[tuple[DataProto, dict[str, float]]]:
-        self_distillation_cfg = self.config.actor_rollout_ref.actor.get("self_distillation", None)
+        raw_self_distillation_cfg = self.config.actor_rollout_ref.actor.get("self_distillation", None)
         loss_mode = self.config.actor_rollout_ref.actor.policy_loss.get("loss_mode", "vanilla")
-        if self_distillation_cfg is None or loss_mode != "sdpo":
+        if raw_self_distillation_cfg is None or loss_mode != "sdpo":
             return None
+        self_distillation_cfg = omega_conf_to_dataclass(
+            raw_self_distillation_cfg,
+            dataclass_type=SelfDistillationConfig,
+        )
         if "raw_prompt" not in batch.non_tensor_batch:
             raise ValueError("SDPO requires raw_prompt in batch.non_tensor_batch.")
 

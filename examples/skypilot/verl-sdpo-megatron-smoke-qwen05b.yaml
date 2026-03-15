@@ -127,11 +127,15 @@ run: |
   if [ "$SKYPILOT_NODE_RANK" == "0" ]; then
     echo "Starting Ray head node..."
     cd /root
-    ps aux | grep ray | grep 6379 &> /dev/null || ray start --head --disable-usage-stats \
-      --port=6379 \
-      --dashboard-host=0.0.0.0 \
-      --dashboard-port=8265
-    until ray status >/dev/null 2>&1; do
+    if ! ray status --address="$RAY_ADDRESS" >/dev/null 2>&1; then
+      pkill -f '/tmp/ray/session_' || true
+      sleep 2
+      ray start --head --disable-usage-stats \
+        --port=6379 \
+        --dashboard-host=0.0.0.0 \
+        --dashboard-port=8265
+    fi
+    until ray status --address="$RAY_ADDRESS" >/dev/null 2>&1; do
       echo "Waiting for custom Ray on 127.0.0.1:6379..."
       sleep 2
     done

@@ -8,6 +8,20 @@ Get the SkyPilot Megatron smoke run in
 `examples/skypilot/verl-sdpo-megatron-smoke-qwen05b.yaml`
 to launch cleanly enough to validate the SDPO path on the small public setup.
 
+## Original Task
+
+- Run and debug the SkyPilot Megatron smoke experiment end to end.
+- Keep a repo-local log of issues found and how they were resolved.
+- Push repo code changes to the fork branch when remote clone-based runs need them.
+- Use the shared launch command as the canonical way to reproduce the experiment.
+
+## Working Plan
+
+1. Inspect the latest failure carefully before patching.
+2. Patch the relevant code or launcher, update this debug log, and do a quick local verification when possible.
+3. Commit and push repo code changes when the remote node needs to clone the updated branch.
+4. Relaunch on SkyPilot, inspect the next outcome, and repeat until the smoke run succeeds or the next blocker is isolated clearly.
+
 ## Command
 
 ```bash
@@ -16,9 +30,35 @@ source ../skypilot-infra/.venv/bin/activate
 sky launch -c verl-sdpo-smoke /Users/zhoutong/code/verl/examples/skypilot/verl-sdpo-megatron-smoke-qwen05b.yaml --secret WANDB_API_KEY -y
 ```
 
+## Current Status Snapshot
+
+Update this section every time a task completes, a new issue is found, or an old issue is resolved.
+
+- Last checked: 2026-03-14
+- Cluster: `verl-sdpo-smoke`
+- Latest remote task: `7`
+- Branch / pushed commit: `codex/sdpo-megatron-v070` at `87b1bf41`
+- Current run stage reached: trainer entered the SDPO path and failed during self-distillation batch construction
+- Current active blocker:
+  validating a local trainer-side fix for the SDPO config/schema mismatch before the next relaunch
+- Plan status:
+  1. Inspect the latest failure carefully before patching. `completed` for task `7`
+  2. Patch the relevant code or launcher, update this debug log, and do a quick local verification when possible. `completed`
+  3. Commit and push repo code changes when the remote node needs to clone the updated branch. `in_progress`
+  4. Relaunch on SkyPilot, inspect the next outcome, and repeat until the smoke run succeeds or the next blocker is isolated clearly. `pending`
+- Recent completed milestones:
+  - setup passes on the smoke cluster
+  - custom Megatron ref build no longer crashes on colocated actor+ref init
+  - run now reaches `trainer.fit()` and SDPO batch construction
+  - trainer-side SDPO config node is now normalized through `SelfDistillationConfig` before template access
+- Local workspace state:
+  - uncommitted changes in `SDPO_SMOKE_DEBUG_LOG.md`
+  - uncommitted changes in `examples/skypilot/verl-sdpo-megatron-smoke-qwen05b.yaml`
+  - uncommitted changes in `verl/trainer/ppo/ray_trainer.py`
+
 ## Debug Notes
 
-### 2026-03-14: Initial setup-stage failures
+### [Resolved] 2026-03-14: Initial setup-stage failures
 
 Issue:
 - the job originally failed in `setup`
@@ -32,7 +72,7 @@ Resolution:
 Status:
 - setup now passes
 
-### 2026-03-14: Current run-stage failure
+### [Resolved] 2026-03-14: Current run-stage failure
 
 Issue:
 - run now fails during Megatron worker model initialization
@@ -59,7 +99,7 @@ Next step:
 - patch the smoke launcher to disable vanilla mbridge
 - relaunch and inspect the next failure, if any
 
-### 2026-03-14: Current rerun hang at Ray worker startup
+### [Resolved] 2026-03-14: Current rerun hang at Ray worker startup
 
 Issue:
 - a later rerun passed setup and got into `main_ppo`, but Ray workers failed to start
@@ -93,7 +133,7 @@ Next step:
 - relaunch with the patched launcher
 - verify that Ray workers start cleanly and the run gets past trainer initialization
 
-### 2026-03-14: Ref model init bug in colocated Megatron SDPO worker
+### [Resolved] 2026-03-14: Ref model init bug in colocated Megatron SDPO worker
 
 Issue:
 - after the launcher fixes, the smoke run got through setup, Ray startup, dataset loading,
@@ -129,7 +169,7 @@ Status:
 - this change must be committed and pushed before the next SkyPilot relaunch, because the
   launcher clones the fork branch on the remote node
 
-### 2026-03-14: Custom Ray head readiness race in launcher
+### [Resolved] 2026-03-14: Custom Ray head readiness race in launcher
 
 Issue:
 - after pushing the ref-build fix, the next relaunch got through setup and started `main_ppo`
@@ -150,7 +190,7 @@ Status:
 - local launcher patch applied
 - no repo code push needed for this step because the YAML itself is launched from the local checkout
 
-### 2026-03-14: Ref offload init bug in colocated Megatron SDPO worker
+### [Resolved] 2026-03-14: Ref offload init bug in colocated Megatron SDPO worker
 
 Issue:
 - after the ref-build fix, the smoke run got deeper into `actor_rollout_ref_init_model`
@@ -178,6 +218,75 @@ Resolution applied:
   instead of inheriting actor-only overrides
 
 Status:
-- local patch applied and syntax-checked
-- this change must be committed and pushed before the next SkyPilot relaunch, because the
-  launcher clones the fork branch on the remote node
+- patch committed and pushed in `87b1bf41`
+- task `7` got past this path and reached `trainer.fit()`
+- no longer the active blocker
+
+### [Resolved] 2026-03-14: Custom Ray health check still too weak on relaunch
+
+Issue:
+- task `6` did not immediately reproduce the previous Python exception
+- instead, it stalled in the launcher at:
+  `Waiting for custom Ray on 127.0.0.1:6379...`
+
+What we found:
+- the head-node run block still used a process-existence shortcut before `ray start`
+- an older `gcs_server` on port `6379` was still present from a previous failed attempt
+- that stale process was enough to skip `ray start`, but not healthy enough for
+  `ray status --address=127.0.0.1:6379` to succeed
+
+Resolution in progress:
+- replace the `ps aux | grep 6379` shortcut with a real
+  `ray status --address="$RAY_ADDRESS"` health check
+- if the health check fails, kill stale `/tmp/ray/session_` processes in the run block
+  and start a fresh custom Ray head before entering the readiness loop
+
+Status:
+- local launcher patch applied
+- task `7` got past the old stalled readiness loop
+- no longer the active blocker
+
+### [WIP] 2026-03-14: SDPO config schema mismatch during teacher-batch construction
+
+Issue:
+- task `7` got through setup, custom Ray startup, Megatron worker initialization,
+  and into the trainer loop
+- it then failed in `trainer.fit()` with:
+  `omegaconf.errors.ConfigAttributeError: Key 'solution_template' is not in struct`
+
+Where it happens:
+- `verl/trainer/ppo/ray_trainer.py`
+- `_maybe_build_self_distillation_batch()`
+- the code accesses:
+  `actor_rollout_ref.actor.self_distillation.solution_template`
+
+Observed failure:
+- traceback points to:
+  `self_distillation_cfg.solution_template.format(...)`
+- OmegaConf says `solution_template` is not present in the structured config object
+
+Current hypothesis:
+- the trainer-side SDPO code expects config keys that are not declared in the
+  `SelfDistillationConfig` dataclass used by the structured actor config
+- either the config schema and the trainer implementation drifted apart, or the
+  smoke config is still using the old/new field names inconsistently
+
+Next step:
+- inspect `verl/workers/config/actor.py` and the SDPO trainer config to compare the
+  declared `self_distillation` fields against what `ray_trainer.py` reads
+- patch either the schema or the trainer to make the field names consistent
+
+Update:
+- root cause is now clearer:
+  `SelfDistillationConfig` defines `solution_template`, `feedback_template`, and
+  `reprompt_template`, but `ray_trainer.py` was reading the raw Hydra config node,
+  which only contained the explicitly overridden YAML keys
+- local fix applied:
+  normalize `actor_rollout_ref.actor.self_distillation` through
+  `omega_conf_to_dataclass(..., dataclass_type=SelfDistillationConfig)`
+  before the trainer reads template fields
+- local verification:
+  `python3 -m compileall verl/trainer/ppo/ray_trainer.py` passed
+- remaining work:
+  commit and push this patch, then relaunch to verify that task `8` gets past
+  self-distillation batch construction
