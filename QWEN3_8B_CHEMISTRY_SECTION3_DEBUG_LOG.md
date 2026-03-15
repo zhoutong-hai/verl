@@ -72,11 +72,17 @@ bash /Users/zhoutong/code/verl/examples/sdpo_trainer/run_qwen3_8b_sciknoweval_ch
 - Chemistry-specific configs and a single run script have been added.
 - Chemistry assets are staged on `model-eval` under `/hai/zhoutong/section3_chemistry_assets/`.
 - A SkyPilot launcher has been updated to use the staged `/hai/zhoutong` model and dataset paths directly.
+- Chemistry launcher changes were pushed to `codex/sdpo-megatron-v070` in commit `702ffe84`.
+- The first live run is the on-policy `grpo_fsdp` baseline on cluster `model-eval`.
+- The first launch attempt hit a SkyPilot resource mismatch because `model-eval` was already up with a different image, so the cluster was recreated before relaunch.
+- The recreated `model-eval` cluster successfully reached setup and started job `1`.
+- Job `1` failed in trainer config resolution because the chemistry trainer YAMLs expected `CHEMISTRY_TRAIN_FILE` / `CHEMISTRY_VAL_FILE` in the environment.
+- The trainer configs have now been patched to derive parquet paths directly from `CHEMISTRY_DATA_DIR`, which is already exported by the SkyPilot launcher.
 - The staged remote model path is `/hai/zhoutong/section3_chemistry_assets/models/Qwen3-8B-Base`, backed by the existing cached checkpoint under `/hai/zhoutong/.modelscope_cache/models/Qwen/Qwen3-8B-Base`.
 - The staged remote dataset path is `/hai/zhoutong/section3_chemistry_assets/data/sciknoweval_chemistry`.
 - Python syntax and YAML parsing checks passed locally.
 - Full Hydra config rendering has not been validated locally because the desktop Python env is missing `packaging`.
-- Next launch target is the on-policy `grpo_fsdp` baseline on the updated SkyPilot path.
+- Current focus is pushing the config fix and relaunching the first GRPO baseline on a fresh cluster name so `model-eval` can remain available.
 
 ## Debug Notes
 
@@ -117,9 +123,28 @@ bash /Users/zhoutong/code/verl/examples/sdpo_trainer/run_qwen3_8b_sciknoweval_ch
 ### [WIP] Validate config composition and launch the first Chemistry run
 
 - Local script syntax and SkyPilot YAML parsing passed.
-- The next live step is launching the on-policy GRPO FSDP baseline from the updated SkyPilot path.
+- The live step in progress is launching the on-policy GRPO FSDP baseline from the updated SkyPilot path.
+
+### [Resolved] Existing `model-eval` cluster image mismatch blocked the first launch
+
+- The first `sky launch -c model-eval ...` attempt failed with `sky.exceptions.ResourcesMismatchError` because the existing `model-eval` cluster was running a different image (`docker:nvcr.io/nvidia/nemo:25.09.02`) than the chemistry YAML expects.
+- Since the staged Chemistry assets live on `/hai`, it was safe to recreate the cluster.
+- `sky down -y model-eval` completed successfully, and the chemistry relaunch is now running against a fresh `model-eval` cluster.
+
+### [Resolved] First GRPO launch failed because chemistry parquet env vars were resolved too early
+
+- The recreated `model-eval` cluster reached setup, cloned the branch, generated the chemistry parquet files from the staged JSON data, and started job `1`.
+- The run then failed in Hydra/OmegaConf resolution with:
+  `InterpolationResolutionError: Environment variable 'CHEMISTRY_TRAIN_FILE' not found`
+- Root cause: the chemistry trainer YAMLs referenced `CHEMISTRY_TRAIN_FILE` and `CHEMISTRY_VAL_FILE`, but those were only set inside the shell wrapper and were not guaranteed to exist in the environment seen during trainer config resolution.
+- Fix: update the chemistry trainer YAMLs to use `${oc.env:CHEMISTRY_DATA_DIR}/train.parquet` and `${oc.env:CHEMISTRY_DATA_DIR}/test.parquet` directly.
 
 ### [WIP] Local Hydra render is blocked by desktop env dependencies
 
 - `python3 -m verl.trainer.main_ppo --cfg job` currently fails locally with `ModuleNotFoundError: No module named 'packaging'`.
 - This is a local environment issue on the desktop Python, not a syntax error in the branch.
+
+### [WIP] Relaunch the first GRPO baseline on a fresh cluster name
+
+- Per the current execution preference, the next launch should use a new cluster name instead of reusing `model-eval`.
+- The relaunch should happen after the `CHEMISTRY_DATA_DIR`-based config fix is committed and pushed.

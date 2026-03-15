@@ -5,8 +5,8 @@ defaults:
 max_model_len: 10240
 
 data:
-  train_files: ["${oc.env:CHEMISTRY_TRAIN_FILE}"]
-  val_files: ["${oc.env:CHEMISTRY_VAL_FILE}"]
+  train_files: ["${oc.env:CHEMISTRY_DATA_DIR}/train.parquet"]
+  val_files: ["${oc.env:CHEMISTRY_DATA_DIR}/test.parquet"]
   train_batch_size: 32
   filter_overlong_prompts: true
   max_prompt_length: 2048
