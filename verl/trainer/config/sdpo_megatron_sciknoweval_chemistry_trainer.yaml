@@ -1,0 +1,89 @@
+defaults:
+  - ppo_megatron_trainer
+  - _self_
+
+max_model_len: 18944
+
+data:
+  train_files: ["${oc.env:CHEMISTRY_TRAIN_FILE}"]
+  val_files: ["${oc.env:CHEMISTRY_VAL_FILE}"]
+  train_batch_size: 32
+  filter_overlong_prompts: true
+  max_prompt_length: 2048
+  max_response_length: 8192
+  shuffle: true
+  trust_remote_code: true
+  apply_chat_template_kwargs: {"enable_thinking": false}
+
+actor_rollout_ref:
+  model:
+    path: ${oc.env:MODEL_PATH,Qwen/Qwen3-8B}
+    trust_remote_code: true
+    use_remove_padding: true
+    enable_gradient_checkpointing: true
+  actor:
+    ppo_mini_batch_size: 32
+    ppo_micro_batch_size_per_gpu: 1
+    ppo_max_token_len_per_gpu: ${max_model_len}
+    use_kl_loss: false
+    megatron:
+      tensor_model_parallel_size: ${oc.decode:${oc.env:TRAIN_TP_SIZE,2}}
+      pipeline_model_parallel_size: ${oc.decode:${oc.env:TRAIN_PP_SIZE,1}}
+    policy_loss:
+      loss_mode: sdpo
+    self_distillation:
+      teacher_scoring_mode: trainer_ref
+      full_logit_distillation: false
+      alpha: 1.0
+      success_reward_threshold: 1.0
+      teacher_regularization: ema
+      teacher_update_rate: 0.05
+      dont_reprompt_on_self_success: true
+      include_environment_feedback: false
+      max_reprompt_len: 10240
+      is_clip: 2.0
+    optim:
+      lr: 1e-5
+      lr_warmup_steps: 10
+  ref:
+    log_prob_micro_batch_size_per_gpu: 1
+    megatron:
+      tensor_model_parallel_size: ${oc.decode:${oc.env:TRAIN_TP_SIZE,2}}
+      pipeline_model_parallel_size: ${oc.decode:${oc.env:TRAIN_PP_SIZE,1}}
+  rollout:
+    name: vllm
+    n: 8
+    calculate_log_probs: true
+    gpu_memory_utilization: 0.55
+    tensor_model_parallel_size: ${oc.decode:${oc.env:ROLLOUT_TP_SIZE,2}}
+    pipeline_model_parallel_size: ${oc.decode:${oc.env:ROLLOUT_PP_SIZE,1}}
+    log_prob_micro_batch_size_per_gpu: 1
+    max_num_batched_tokens: ${max_model_len}
+    max_model_len: ${max_model_len}
+    val_kwargs:
+      top_p: 0.95
+      temperature: 0.6
+      n: 16
+      do_sample: true
+algorithm:
+  adv_estimator: grpo
+  norm_adv_by_std_in_grpo: false
+  use_kl_in_reward: false
+  rollout_correction:
+    rollout_is: token
+    rollout_is_threshold: 2.0
+
+custom_reward_function:
+  path: verl/utils/reward_score/feedback/__init__.py
+
+trainer:
+  project_name: qwen3_8b_section3_chemistry
+  experiment_name: qwen3_8b_section3_chemistry_sdpo_megatron
+  logger: ["console", "wandb"]
+  nnodes: ${oc.decode:${oc.env:NNODES,1}}
+  n_gpus_per_node: ${oc.decode:${oc.env:N_GPUS_PER_NODE,8}}
+  save_freq: -1
+  test_freq: 5
+  total_epochs: 30
+  val_before_train: false
+  critic_warmup: 0

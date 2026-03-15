@@ -47,6 +47,7 @@ class SelfDistillationConfig(BaseConfig):
     success_reward_threshold: float = 1.0
     teacher_regularization: str = "ema"
     teacher_update_rate: float = 0.05
+    teacher_scoring_mode: str = "trainer_ref"
     distillation_topk: Optional[int] = None
     distillation_add_tail: bool = True
     max_reprompt_len: int = 10240
@@ -83,6 +84,12 @@ class SelfDistillationConfig(BaseConfig):
         if not 0.0 <= self.teacher_update_rate <= 1.0:
             raise ValueError(
                 f"self_distillation.teacher_update_rate must be in [0,1], got {self.teacher_update_rate}"
+            )
+        valid_teacher_scoring_modes = ["trainer_ref", "actor_worker"]
+        if self.teacher_scoring_mode not in valid_teacher_scoring_modes:
+            raise ValueError(
+                "self_distillation.teacher_scoring_mode must be one of "
+                f"{valid_teacher_scoring_modes}, got {self.teacher_scoring_mode}"
             )
         if self.distillation_topk is not None and self.distillation_topk <= 0:
             raise ValueError(

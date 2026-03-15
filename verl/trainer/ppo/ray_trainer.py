@@ -1750,8 +1750,16 @@ class RayPPOTrainer:
                         )
                         if self_distillation_data is not None:
                             teacher_batch, self_distillation_metrics = self_distillation_data
-                            teacher_log_prob = self._compute_self_distillation_teacher_log_prob(teacher_batch)
-                            batch = batch.union(teacher_log_prob)
+                            raw_self_distillation_cfg = self.config.actor_rollout_ref.actor.get("self_distillation")
+                            self_distillation_cfg = omega_conf_to_dataclass(
+                                raw_self_distillation_cfg,
+                                dataclass_type=SelfDistillationConfig,
+                            )
+                            if self_distillation_cfg.teacher_scoring_mode == "actor_worker":
+                                batch = batch.union(teacher_batch)
+                            else:
+                                teacher_log_prob = self._compute_self_distillation_teacher_log_prob(teacher_batch)
+                                batch = batch.union(teacher_log_prob)
                             metrics.update(self_distillation_metrics)
 
                         if reward_extra_infos_dict:

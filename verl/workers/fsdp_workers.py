@@ -777,6 +777,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
         from verl.workers.actor import DataParallelPPOActor
+        from verl.workers.actor.dp_actor import TrustRegionTeacher
 
         # This is used to import external_lib into the huggingface systems
         import_external_libs(self.config.model.get("external_lib", None))
@@ -839,6 +840,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             self.actor = DataParallelPPOActor(
                 config=actor_cfg, actor_module=self.actor_module_fsdp, actor_optimizer=self.actor_optimizer
             )
+            if getattr(self, "tokenizer", None) is not None:
+                self.actor.tokenizer = self.tokenizer
 
         if self._is_rollout:
             self._build_rollout(trust_remote_code=self.config.model.get("trust_remote_code", False))
@@ -878,6 +881,21 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 self.config.ref.use_remove_padding = use_remove_padding
                 self.config.ref.use_fused_kernels = use_fused_kernels
             self.ref_policy = DataParallelPPOActor(config=self.config.ref, actor_module=self.ref_module_fsdp)
+            if getattr(self, "tokenizer", None) is not None:
+                self.ref_policy.tokenizer = self.tokenizer
+            if self._is_actor:
+                self_distillation_cfg = self.config.actor.get("self_distillation", None)
+                loss_mode = self.config.actor.policy_loss.get("loss_mode", "vanilla")
+                if self_distillation_cfg is not None and loss_mode == "sdpo":
+                    teacher_regularization = self_distillation_cfg.get("teacher_regularization", "ema")
+                    if teacher_regularization == "trust-region":
+                        self.actor.teacher_module = TrustRegionTeacher(
+                            ref_module=self.ref_module_fsdp,
+                            student_module=self.actor_module_fsdp,
+                            mix_coef=self_distillation_cfg.get("teacher_update_rate", 0.0),
+                        )
+                    else:
+                        self.actor.teacher_module = self.ref_module_fsdp
 
         if self._is_actor:
             self.flops_counter = FlopsCounter(self.actor_model_config)
@@ -1015,13 +1033,14 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         data.meta_info["max_token_len"] = config_source.log_prob_max_token_len_per_gpu
         data.meta_info["use_dynamic_bsz"] = config_source.log_prob_use_dynamic_bsz
         data.meta_info["temperature"] = self.config.rollout.temperature
+        data.meta_info.setdefault("pad_token_id", self.tokenizer.pad_token_id)
         # perform recompute log_prob
         with self.ulysses_sharding_manager:
             with adapter_ctx:
-                output, entropys = self.actor.compute_log_prob(data=data, calculate_entropy=not is_lora)
-            tensors = {"ref_log_prob": output} if is_lora else {"old_log_probs": output}
-            if not is_lora:
-                tensors["entropys"] = entropys
+                outputs = self.actor.compute_log_prob(data=data, calculate_entropy=not is_lora)
+            tensors = {"ref_log_prob": outputs["log_probs"]} if is_lora else {"old_log_probs": outputs["log_probs"]}
+            if not is_lora and "entropys" in outputs:
+                tensors["entropys"] = outputs["entropys"]
             output = DataProto.from_dict(
                 tensors=tensors,
                 meta_info={"temperature": self.config.rollout.temperature},
@@ -1056,10 +1075,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         data.meta_info["temperature"] = self.config.rollout.temperature
         data.meta_info["max_token_len"] = self.config.ref.log_prob_max_token_len_per_gpu
         data.meta_info["use_dynamic_bsz"] = self.config.ref.log_prob_use_dynamic_bsz
+        data.meta_info.setdefault("pad_token_id", self.tokenizer.pad_token_id)
         with self.ulysses_sharding_manager:
             data = data.to("cpu")  # data will to device with each micro batch on ref.compute_log_prob
-            output, _ = self.ref_policy.compute_log_prob(data=data, calculate_entropy=False)
-            output = DataProto.from_dict(tensors={"ref_log_prob": output})
+            outputs = self.ref_policy.compute_log_prob(data=data, calculate_entropy=False)
+            output = DataProto.from_dict(tensors={"ref_log_prob": outputs["log_probs"]})
 
         output = output.to("cpu")
 
