@@ -68,6 +68,12 @@ sky launch -c verl-sdpo-smoke examples/skypilot/verl-sdpo-megatron-smoke-qwen05b
 Runs the same custom local SDPO Megatron branch, but on `Qwen/Qwen2.5-0.5B-Instruct` plus GSM8K for a very small smoke test. This keeps the SkyPilot and Megatron environment shape while using a cheap public model. The YAML defaults to `VARIANT=sdpo`; set `envs.VARIANT` to `grpo` if you want the baseline path instead. The current version expects pre-staged assets on the node under `/hai/zhoutong/sdpo_megatron_smoke_qwen25_05b/` instead of downloading them during setup.
 It clones `https://github.com/zhoutong-hai/verl.git` on branch `codex/sdpo-megatron-v070`, so the remote job runs the SDPO branch directly instead of a fresh upstream checkout.
 
+### Qwen3-8B Chemistry Section 3 Pilot
+```bash
+sky launch -c verl-qwen3-chemistry examples/skypilot/verl-qwen3-section3-chemistry.yaml --secret WANDB_API_KEY -y
+```
+Runs the Section 3 Chemistry pilot for `Qwen/Qwen3-8B` from the same branch. The YAML mounts the local Chemistry dataset directory, clones the fork branch, and uses `envs.VARIANT` to switch among `grpo_fsdp`, `sdpo_fsdp`, and `sdpo_megatron`.
+
 ### Multi-turn Tool Usage Training
 ```bash
 sky launch -c verl-multiturn verl-multiturn-tools.yaml --secret WANDB_API_KEY --secret HF_TOKEN -y

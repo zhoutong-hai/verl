@@ -70,6 +70,7 @@ bash /Users/zhoutong/code/verl/examples/sdpo_trainer/run_qwen3_8b_sciknoweval_ch
 - Upstream-style FSDP SDPO actor path has been integrated into this branch.
 - Trainer now supports choosing actor-side teacher scoring for the original FSDP SDPO path.
 - Chemistry-specific configs and a single run script have been added.
+- A SkyPilot launcher has been added for the Chemistry pilot.
 - Python syntax and YAML parsing checks passed locally.
 - Full Hydra config rendering has not been validated locally because the desktop Python env is missing `packaging`.
 - Chemistry pilot has not been launched yet from this branch.
@@ -98,6 +99,11 @@ bash /Users/zhoutong/code/verl/examples/sdpo_trainer/run_qwen3_8b_sciknoweval_ch
 - Added [sdpo_fsdp_sciknoweval_chemistry_trainer.yaml](/Users/zhoutong/code/verl/verl/trainer/config/sdpo_fsdp_sciknoweval_chemistry_trainer.yaml).
 - Added [sdpo_megatron_sciknoweval_chemistry_trainer.yaml](/Users/zhoutong/code/verl/verl/trainer/config/sdpo_megatron_sciknoweval_chemistry_trainer.yaml).
 - Added [run_qwen3_8b_sciknoweval_chemistry_section3.sh](/Users/zhoutong/code/verl/examples/sdpo_trainer/run_qwen3_8b_sciknoweval_chemistry_section3.sh).
+
+### [Resolved] Added a single-node SkyPilot launcher for the Chemistry pilot
+
+- Added [verl-qwen3-section3-chemistry.yaml](/Users/zhoutong/code/verl/examples/skypilot/verl-qwen3-section3-chemistry.yaml).
+- The launcher mounts the local Chemistry dataset directory, clones this fork branch, and can switch among `grpo_fsdp`, `sdpo_fsdp`, and `sdpo_megatron` through `envs.VARIANT`.
 
 ### [WIP] Validate config composition and launch the first Chemistry run
 
