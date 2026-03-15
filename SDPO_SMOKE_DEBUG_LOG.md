@@ -36,25 +36,28 @@ Update this section every time a task completes, a new issue is found, or an old
 
 - Last checked: 2026-03-14
 - Cluster: `verl-sdpo-smoke`
-- Latest remote task: `7`
-- Branch / pushed commit: `codex/sdpo-megatron-v070` at `87b1bf41`
-- Current run stage reached: trainer entered the SDPO path and failed during self-distillation batch construction
+- Latest remote task: `8`
+- Branch / pushed commit: `codex/sdpo-megatron-v070` at `3c409cbc`
+- Current run stage reached: task `8` got past setup, trainer initialization, self-distillation batch construction, and into the first actor update
 - Current active blocker:
-  validating a local trainer-side fix for the SDPO config/schema mismatch before the next relaunch
+  Megatron actor SDPO loss path still sees `self_distillation` as a plain dict during the first actor update
 - Plan status:
   1. Inspect the latest failure carefully before patching. `completed` for task `7`
   2. Patch the relevant code or launcher, update this debug log, and do a quick local verification when possible. `completed`
-  3. Commit and push repo code changes when the remote node needs to clone the updated branch. `in_progress`
-  4. Relaunch on SkyPilot, inspect the next outcome, and repeat until the smoke run succeeds or the next blocker is isolated clearly. `pending`
+  3. Commit and push repo code changes when the remote node needs to clone the updated branch. `completed`
+  4. Relaunch on SkyPilot, inspect the next outcome, and repeat until the smoke run succeeds or the next blocker is isolated clearly. `in_progress`
 - Recent completed milestones:
   - setup passes on the smoke cluster
   - custom Megatron ref build no longer crashes on colocated actor+ref init
   - run now reaches `trainer.fit()` and SDPO batch construction
   - trainer-side SDPO config node is now normalized through `SelfDistillationConfig` before template access
+  - trainer-side normalization fix pushed in `3c409cbc`
+  - task `8` launched to validate the fix
+  - task `8` got past the old `solution_template` crash
+  - task `8` reached the first actor update before failing
 - Local workspace state:
   - uncommitted changes in `SDPO_SMOKE_DEBUG_LOG.md`
-  - uncommitted changes in `examples/skypilot/verl-sdpo-megatron-smoke-qwen05b.yaml`
-  - uncommitted changes in `verl/trainer/ppo/ray_trainer.py`
+  - uncommitted changes in `verl/workers/actor/megatron_actor.py`
 
 ## Debug Notes
 
@@ -246,7 +249,7 @@ Status:
 - task `7` got past the old stalled readiness loop
 - no longer the active blocker
 
-### [WIP] 2026-03-14: SDPO config schema mismatch during teacher-batch construction
+### [Resolved] 2026-03-14: SDPO config schema mismatch during teacher-batch construction
 
 Issue:
 - task `7` got through setup, custom Ray startup, Megatron worker initialization,
@@ -290,3 +293,39 @@ Update:
 - remaining work:
   commit and push this patch, then relaunch to verify that task `8` gets past
   self-distillation batch construction
+
+Status:
+- patch committed and pushed in `3c409cbc`
+- task `8` got past self-distillation batch construction and no longer reproduces the
+  `solution_template` config error
+- no longer the active blocker
+
+### [WIP] 2026-03-15: Megatron actor SDPO loss still receives nested config as dict
+
+Issue:
+- task `8` got past the trainer-side SDPO config mismatch and reached the first actor update
+- it then failed in the Megatron actor loss path with:
+  `AttributeError: 'dict' object has no attribute 'full_logit_distillation'`
+
+Where it happens:
+- `verl/workers/actor/megatron_actor.py`
+- inside the SDPO branch of `loss_func`
+- failing line:
+  `if self_distillation_cfg.full_logit_distillation:`
+
+Root cause:
+- `MegatronPPOActor` receives an instantiated `ActorConfig`, but the nested
+  `self_distillation` field is still a plain dict rather than a fully normalized
+  `SelfDistillationConfig`
+- that means the trainer-side normalization fixed the batch-construction path, but the
+  first actor update still crashes when it expects attribute access on the nested config
+
+Resolution in progress:
+- normalize `self.config.self_distillation` through
+  `omega_conf_to_dataclass(..., dataclass_type=SelfDistillationConfig)` inside the
+  SDPO loss branch before reading `full_logit_distillation`
+
+Status:
+- local patch applied
+- `python3 -m compileall verl/workers/actor/megatron_actor.py` passed
+- next step is commit, push, and relaunch task `9`

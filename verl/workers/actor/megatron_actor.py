@@ -39,6 +39,7 @@ from torch import nn
 from verl import DataProto
 from verl.trainer.ppo.core_algos import agg_loss, compute_self_distillation_loss, get_policy_loss_fn, kl_penalty
 from verl.utils.device import get_device_id, get_torch_device
+from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.megatron.pipeline_parallel import make_batch_generator
 from verl.utils.megatron.router_replay_patch import RouterReplay, RouterReplayAction
 from verl.utils.megatron.router_replay_utils import (
@@ -56,6 +57,7 @@ from verl.utils.py_functional import append_to_dict
 from verl.utils.seqlen_balancing import get_reverse_idx, rearrange_micro_batches
 from verl.utils.torch_functional import broadcast_dict_tensor
 from verl.workers.actor import BasePPOActor
+from verl.workers.config import SelfDistillationConfig
 
 __all__ = ["MegatronPPOActor"]
 
@@ -493,9 +495,13 @@ class MegatronPPOActor(BasePPOActor):
                 # Weights are computed centrally in trainer and added when algorithm.rollout_is=True
                 rollout_is_weights = data.get("rollout_is_weights", None)
                 if loss_mode == "sdpo":
-                    self_distillation_cfg = getattr(self.config, "self_distillation", None)
-                    if self_distillation_cfg is None:
+                    raw_self_distillation_cfg = getattr(self.config, "self_distillation", None)
+                    if raw_self_distillation_cfg is None:
                         raise ValueError("loss_mode='sdpo' requires actor.self_distillation config.")
+                    self_distillation_cfg = omega_conf_to_dataclass(
+                        raw_self_distillation_cfg,
+                        dataclass_type=SelfDistillationConfig,
+                    )
                     if self_distillation_cfg.full_logit_distillation:
                         raise NotImplementedError(
                             "Megatron SDPO on v0.7.0 supports token-level distillation only. "
