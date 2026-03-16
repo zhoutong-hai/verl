@@ -98,31 +98,93 @@ sky launch -c verl-qwen3-chemistry-sdpo-megatron \
 - `perf/throughput`
 - `perf/time_per_step`
 
-## Current Status Snapshot
+## Current Status Snapshot (2026-03-15)
 
-- Upstream-style FSDP SDPO actor path has been integrated into this branch.
-- Trainer now supports choosing actor-side teacher scoring for the original FSDP SDPO path.
-- Chemistry-specific configs and a single run script have been added.
-- Chemistry assets are staged on `model-eval` under `/hai/zhoutong/section3_chemistry_assets/`.
-- A SkyPilot launcher has been updated to use the staged `/hai/zhoutong` model and dataset paths directly.
-- Chemistry launcher changes were pushed to `codex/sdpo-megatron-v070` in commit `702ffe84`.
-- The first live run is the on-policy `grpo_fsdp` baseline on cluster `verl-qwen3-chemistry-grpo`.
-- The first launch attempt hit a SkyPilot resource mismatch because `model-eval` was already up with a different image, so the cluster was recreated before relaunch.
-- The recreated `model-eval` cluster successfully reached setup and started job `1`.
-- Job `1` failed in trainer config resolution because the chemistry trainer YAMLs expected `CHEMISTRY_TRAIN_FILE` / `CHEMISTRY_VAL_FILE` in the environment.
-- The trainer configs have now been patched to derive parquet paths directly from `CHEMISTRY_DATA_DIR`, which is already exported by the SkyPilot launcher.
-- The parquet-path fix was pushed to `codex/sdpo-megatron-v070` in commit `ca9f631a`.
-- A fresh-cluster relaunch on `verl-qwen3-chemistry-grpo` is now past provisioning, with setup detached and job `1` started.
-- The fresh-cluster relaunch got through setup, Ray startup, and trainer config validation before failing in custom reward-function loading.
-- The chemistry trainer configs have now been patched to use `${oc.env:VERL_REPO_DIR}/verl/utils/reward_score/feedback/__init__.py` for the reward function path.
-- The reward-path fix was pushed to `codex/sdpo-megatron-v070` in commit `8f72ea6b`.
-- The staged remote model path is `/hai/zhoutong/section3_chemistry_assets/models/Qwen3-8B-Base`, backed by the existing cached checkpoint under `/hai/zhoutong/.modelscope_cache/models/Qwen/Qwen3-8B-Base`.
-- The staged remote dataset path is `/hai/zhoutong/section3_chemistry_assets/data/sciknoweval_chemistry`.
-- Both `verl-qwen3-chemistry-grpo` and `verl-qwen3-chemistry-sdpo` clusters were launched.
-- `verl-qwen3-chemistry-grpo` is running (status to be checked).
-- `verl-qwen3-chemistry-sdpo` failed in the first actor update with `AttributeError: 'dict' object has no attribute 'full_logit_distillation'` — same dict-vs-dataclass bug as the Megatron smoke fix.
-- Fix applied locally in `dp_actor.py`: normalize `self_distillation_cfg` through `omega_conf_to_dataclass` in both `update_policy()` and `_update_teacher()`.
-- Current focus: commit, push, and relaunch SDPO on `verl-qwen3-chemistry-sdpo`.
+### Run 1 results (configs pre-alignment with upstream)
+
+All three runs from the initial launch have failed or collapsed:
+
+| Cluster | Variant | Status | Detail |
+|---------|---------|--------|--------|
+| `verl-qwen3-chemistry-grpo` | GRPO FSDP | Entropy collapse at step 257 | Score 0.515 → 0.004 in 2 steps |
+| `verl-qwen3-chemistry-sdpo` | SDPO FSDP | Death spiral from step ~19 | All self_distillation metrics zero; loss=0, grad_norm=0 |
+| `verl-qwen3-chemistry-sdpo-megatron` | SDPO Megatron | Crashed on init | `ModuleNotFoundError: megatron.core.distributed.custom_fsdp` |
+
+### Config mismatch with upstream
+
+Our original SDPO configs diverged from the upstream Section 3 effective config in critical ways:
+
+| Parameter | Our original | Upstream effective | Source |
+|-----------|-------------|-------------------|--------|
+| `success_reward_threshold` | 1.0 | 0.5 | `actor.yaml` overrides dataclass default |
+| `alpha` | 1.0 (reverse KL) | 0.5 (JSD) | command-line in `run_sdpo_all.sh` |
+| `full_logit_distillation` | false | true | `actor.yaml` |
+| `distillation_topk` | not set | 100 | command-line in `run_sdpo_all.sh` |
+
+### Fixes applied (commit `0cb2fecb`)
+
+- **SDPO FSDP**: `success_reward_threshold` 1.0 → 0.5 (alpha/logit/topk were already aligned)
+- **SDPO Megatron**: `alpha` 1.0 → 0.5, `success_reward_threshold` 1.0 → 0.5, added `vanilla_mbridge: false`
+- Note: Megatron keeps `full_logit_distillation: false` (raises `NotImplementedError`)
+
+### Run 2 corrected configs (in progress)
+
+Both SDPO jobs relaunched with corrected configs:
+- `verl-qwen3-chemistry-sdpo` — SDPO FSDP with upstream-aligned config
+- `verl-qwen3-chemistry-sdpo-megatron` — SDPO Megatron with upstream-aligned config + mbridge fix
+- GRPO cluster still running (collapsed, kept for reference)
+
+#### SDPO FSDP corrected parameters (`sdpo_fsdp_sciknoweval_chemistry_trainer.yaml`)
+
+| Parameter | Value | Notes |
+|-----------|-------|-------|
+| `alpha` | 0.5 | JSD (matches upstream) |
+| `success_reward_threshold` | 0.5 | Matches upstream `actor.yaml` |
+| `full_logit_distillation` | true | Matches upstream |
+| `distillation_topk` | 100 | Matches upstream |
+| `dont_reprompt_on_self_success` | true | Matches upstream |
+| `include_environment_feedback` | false | Matches upstream |
+| `teacher_scoring_mode` | actor_worker | FSDP-native teacher path |
+| `teacher_regularization` | ema | |
+| `teacher_update_rate` | 0.05 | |
+| `use_kl_loss` | false | |
+| `lr` | 1e-5 | |
+| `train_batch_size` | 32 | |
+| `rollout.n` | 8 | |
+| `ppo_mini_batch_size` | 32 | |
+
+#### SDPO Megatron corrected parameters (`sdpo_megatron_sciknoweval_chemistry_trainer.yaml`)
+
+| Parameter | Value | Notes |
+|-----------|-------|-------|
+| `alpha` | 1.0 | Reverse KL (required when `full_logit_distillation: false`) |
+| `success_reward_threshold` | 0.5 | Matches upstream `actor.yaml` |
+| `full_logit_distillation` | false | Megatron limitation (`NotImplementedError`); forces `alpha=1.0` |
+| `dont_reprompt_on_self_success` | true | Matches upstream |
+| `include_environment_feedback` | false | Matches upstream |
+| `teacher_scoring_mode` | trainer_ref | Megatron teacher path |
+| `teacher_regularization` | ema | |
+| `teacher_update_rate` | 0.05 | |
+| `vanilla_mbridge` | false | Fixes `custom_fsdp` crash on megatron-core 0.15.0 |
+| `use_kl_loss` | false | |
+| `lr` | 1e-5 | |
+| `train_batch_size` | 32 | |
+| `rollout.n` | 8 | |
+| `ppo_mini_batch_size` | 32 | |
+
+#### GRPO FSDP parameters (`grpo_fsdp_sciknoweval_chemistry_trainer.yaml`, unchanged)
+
+| Parameter | Value | Notes |
+|-----------|-------|-------|
+| `adv_estimator` | grpo | |
+| `use_kl_loss` | false | No KL regularization |
+| `use_kl_in_reward` | false | |
+| `lr` | 1e-5 | Upstream also sweeps 1e-6 |
+| `train_batch_size` | 32 | |
+| `rollout.n` | 8 | |
+| `ppo_mini_batch_size` | 32 | |
+| `rollout_is` | token | |
+| `rollout_is_threshold` | 2.0 | |
 
 ## Debug Notes
 
@@ -200,25 +262,59 @@ sky launch -c verl-qwen3-chemistry-sdpo-megatron \
 - Fix: update all three chemistry trainer configs to use
   `${oc.env:VERL_REPO_DIR}/verl/utils/reward_score/feedback/__init__.py`.
 
-### [WIP] FSDP SDPO actor crashes on dict attribute access for self_distillation config
+### [Resolved] FSDP SDPO actor crashes on dict attribute access for self_distillation config
 
 - The SDPO FSDP run on `verl-qwen3-chemistry-sdpo` failed in the first actor update with:
   `AttributeError: 'dict' object has no attribute 'full_logit_distillation'`
 - Failing file: `verl/workers/actor/dp_actor.py`, line 778 in `update_policy()`.
-- Failing line:
-  `return_all_logps = self_distillation_cfg.full_logit_distillation and not self_distillation_cfg.distillation_topk`
 - Root cause: identical to the Megatron actor bug fixed in the smoke test (commit `12d107cc`).
-  The nested `self_distillation` config arrives as a plain Python `dict` from Hydra/OmegaConf
-  resolution, but `dp_actor.py` uses dot-notation attribute access expecting a `SelfDistillationConfig`
-  dataclass.
-- The Megatron actor path (`megatron_actor.py`) was already fixed by normalizing through
-  `omega_conf_to_dataclass(..., dataclass_type=SelfDistillationConfig)`, but the FSDP actor path
-  (`dp_actor.py`) was never exercised in the smoke test and still had the raw dict.
-- Fix applied in `dp_actor.py`:
+- Fix applied in `dp_actor.py` (commit `1b32a8a1`):
   1. Added imports for `omega_conf_to_dataclass` and `SelfDistillationConfig`.
-  2. Normalized `self_distillation_cfg` through `omega_conf_to_dataclass` in `update_policy()`
-     before any dot-notation access.
-  3. Applied the same normalization in `_update_teacher()` to prevent silent fallback to defaults
-     when the config is a plain dict.
-- `python3 -m py_compile verl/workers/actor/dp_actor.py` passed.
-- Remaining: commit, push, and relaunch `verl-qwen3-chemistry-sdpo`.
+  2. Normalized `self_distillation_cfg` through `omega_conf_to_dataclass` in both
+     `update_policy()` and `_update_teacher()`.
+
+### [Resolved] SDPO FSDP death spiral — zero self-distillation activation
+
+- After the dict-vs-dataclass fix, SDPO FSDP started training but collapsed by step ~19.
+- Trajectory: step 1 had `reprompt_sample_fraction: 0.789`, `score/mean: 0.262`.
+  By step 19: all self_distillation metrics = 0.0, `loss = 0.0`, `grad_norm = 0.0`.
+- Root cause: with `success_reward_threshold: 1.0`, the model quickly lost all successful
+  rollouts (score must be exactly 1.0). With no teacher targets, `self_distillation_mask`
+  is all zeros, loss is 0, no gradients flow, model stops learning.
+- There is no GRPO fallback in SDPO mode — when the mask is empty, loss is simply 0.
+- Additionally, `alpha: 1.0` (pure reverse KL) is more aggressive than `0.5` (JSD).
+
+### [Resolved] GRPO FSDP catastrophic entropy collapse at step 257
+
+- GRPO was training stably for ~256 steps: score oscillating around 0.3-0.55, entropy ~0.11.
+- At step 257: entropy crashed from 0.111 to 0.008 (14x drop in one step).
+- By step 258: entropy = 0.0015, score = 0.016, response_length = 7767 (near max 8192).
+- By step 261: score = 0.004, model generating max-length near-deterministic outputs.
+- Validation at step 260: `val-core/sciknoweval/acc/mean@16: 0.0024` — essentially zero.
+- Config factors: `use_kl_loss: false`, `use_kl_in_reward: false`, `lr: 1e-5`.
+  No regularization to prevent the policy from diverging from the reference.
+- Note: upstream sweeps both `lr: 1e-5` and `lr: 1e-6`; the lower LR may be more stable.
+
+### [Resolved] SDPO Megatron crash — missing megatron.core.distributed.custom_fsdp
+
+- Megatron variant crashed during worker init with:
+  `ModuleNotFoundError: No module named 'megatron.core.distributed.custom_fsdp'`
+- Same issue as smoke test (documented in SDPO_SMOKE_DEBUG_LOG.md).
+- `megatron-core==0.15.0` lacks `custom_fsdp`; the default `vanilla_mbridge: true`
+  tries to use vanilla `mbridge` which depends on it.
+- Fix: added `vanilla_mbridge: false` to the Megatron config to use `megatron.bridge` instead.
+
+### [Resolved] Aligned SDPO configs with upstream Section 3 effective settings
+
+- Traced the upstream config chain: Python dataclass defaults → `actor.yaml` overlay →
+  experiment YAML (`sdpo.yaml`) → command-line overrides in `run_sdpo_all.sh`.
+- Effective upstream Section 3 config:
+  - `success_reward_threshold: 0.5` (from `actor.yaml`, overrides dataclass default 1.0)
+  - `alpha: 0.5` (JSD, from command-line)
+  - `full_logit_distillation: true` + `distillation_topk: 100` (from `actor.yaml` + command-line)
+  - `include_environment_feedback: false` (from command-line)
+  - `dont_reprompt_on_self_success: true` (from command-line)
+- Applied fixes in commit `0cb2fecb`:
+  - FSDP: `success_reward_threshold` 1.0 → 0.5
+  - Megatron: `alpha` 1.0 → 0.5, `success_reward_threshold` 1.0 → 0.5, `vanilla_mbridge: false`
+- Both SDPO jobs relaunched.

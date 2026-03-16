@@ -35,7 +35,7 @@ actor_rollout_ref:
     self_distillation:
       teacher_scoring_mode: trainer_ref
       full_logit_distillation: false
-      alpha: 0.5
+      alpha: 1.0
       success_reward_threshold: 0.5
       teacher_regularization: ema
       teacher_update_rate: 0.05
