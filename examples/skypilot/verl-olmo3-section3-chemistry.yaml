@@ -56,7 +56,6 @@ setup: |
   cd "$VERL_REPO_DIR"
   pip3 install --upgrade pip packaging
   pip3 install -v -e .[vllm]
-  pip3 install --upgrade huggingface_hub
   python3 -c "import verl; import pathlib; print(pathlib.Path(verl.__file__).resolve())"
 
   mkdir -p "$MODEL_PATH"

@@ -73,3 +73,9 @@ sky launch -c verl-olmo3-chemistry-sdpo \
 - `model-eval` is no longer reachable.
 - Workaround used: a live Chemistry SkyPilot cluster downloaded the model into `/hai/zhoutong/section3_chemistry_assets/models/Olmo-3-7B-Instruct`.
 - The new OLMo SkyPilot launcher also performs the same download during `setup:` if the shared path is still empty.
+
+### [Resolved] Avoid incompatible `huggingface_hub` upgrade in the OLMo launcher
+
+- Initial OLMo launcher version upgraded `huggingface_hub` to `1.7.1`.
+- That conflicts with the cluster image's `transformers==4.55.4` requirement of `huggingface-hub<1.0`.
+- Fix: remove the explicit upgrade from [verl-olmo3-section3-chemistry.yaml](/Users/zhoutong/code/verl/examples/skypilot/verl-olmo3-section3-chemistry.yaml) and rely on the image's existing compatible version.
