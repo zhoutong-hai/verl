@@ -33,7 +33,7 @@ actor_rollout_ref:
       full_logit_distillation: true
       distillation_topk: 100
       alpha: 0.5
-      success_reward_threshold: 1.0
+      success_reward_threshold: 0.5
       teacher_regularization: ema
       teacher_update_rate: 0.05
       dont_reprompt_on_self_success: true
