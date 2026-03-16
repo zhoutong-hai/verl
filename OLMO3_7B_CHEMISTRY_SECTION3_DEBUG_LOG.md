@@ -78,4 +78,15 @@ sky launch -c verl-olmo3-chemistry-sdpo \
 
 - Initial OLMo launcher version upgraded `huggingface_hub` to `1.7.1`.
 - That conflicts with the cluster image's `transformers==4.55.4` requirement of `huggingface-hub<1.0`.
-- Final fix: explicitly restore a compatible hub version with `huggingface_hub>=0.34.0,<1.0` in [verl-olmo3-section3-chemistry.yaml](/Users/zhoutong/code/verl/examples/skypilot/verl-olmo3-section3-chemistry.yaml), so reused clusters self-heal even if an earlier failed setup already mutated the Python environment.
+- Final fix: explicitly restore a compatible package set in [verl-olmo3-section3-chemistry.yaml](/Users/zhoutong/code/verl/examples/skypilot/verl-olmo3-section3-chemistry.yaml):
+  - `transformers==4.57.1`
+  - `huggingface_hub==0.36.2`
+- This matches the paper-era `transformers` version more closely and repairs reused clusters even if an earlier failed setup mutated the Python environment.
+
+### [Resolved] Remove shell heredoc parsing bug from the OLMo launcher
+
+- The first OLMo launcher used an indented shell heredoc inside the SkyPilot `setup:` block.
+- On the remote cluster, that produced:
+  - `warning: here-document ... wanted 'PY'`
+  - `syntax error: unexpected end of file`
+- Fix: replace the heredoc with a single-line `python3 -c ... snapshot_download(...)` call.
