@@ -439,10 +439,20 @@ class RayPPOTrainer:
         except Exception as e:
             print(f"Warning: Could not set total_training_steps in config. Structure missing? Error: {e}")
 
-    def _dump_generations(self, inputs, outputs, gts, scores, reward_extra_infos_dict, dump_path):
+    def _dump_generations(self, inputs, outputs, gts, scores, reward_extra_infos_dict, dump_path, max_samples=None):
         """Dump rollout/validation samples as JSONL."""
         os.makedirs(dump_path, exist_ok=True)
         filename = os.path.join(dump_path, f"{self.global_steps}.jsonl")
+
+        if max_samples and max_samples > 0:
+            inputs = inputs[:max_samples]
+            outputs = outputs[:max_samples]
+            gts = gts[:max_samples]
+            scores = scores[:max_samples]
+            reward_extra_infos_dict = {
+                key: values[:max_samples] if len(values) >= max_samples else values
+                for key, values in reward_extra_infos_dict.items()
+            }
 
         n = len(inputs)
         base_data = {
@@ -466,6 +476,35 @@ class RayPPOTrainer:
             f.write("\n".join(lines) + "\n")
 
         print(f"Dumped generations to {filename}")
+
+    def _maybe_print_val_generations(self, inputs, outputs, gts, scores):
+        """Print a small number of validation samples inline for quick debugging."""
+        generations_to_print = self.config.trainer.get("print_val_generations", 0)
+        if generations_to_print == 0:
+            return
+
+        max_chars = self.config.trainer.get("validation_console_max_chars", 1200)
+
+        import numpy as np
+
+        samples = list(zip(inputs, outputs, gts, scores, strict=True))
+        samples.sort(key=lambda x: x[0])
+
+        rng = np.random.RandomState(42)
+        rng.shuffle(samples)
+        samples = samples[:generations_to_print]
+
+        def _clip(text: str) -> str:
+            if text is None or len(text) <= max_chars:
+                return text
+            return text[:max_chars] + "\n...<truncated>..."
+
+        for idx, (prompt, response, gt, score) in enumerate(samples, start=1):
+            print(f"[val_sample {idx}/{len(samples)} step={self.global_steps}]")
+            print("[prompt]", _clip(prompt))
+            print("[response]", _clip(response))
+            print("[ground_truth]", gt)
+            print("[score]", score)
 
     def _log_rollout_data(
         self, batch: DataProto, reward_extra_infos_dict: dict, timing_raw: dict, rollout_data_dir: str
@@ -952,6 +991,12 @@ class RayPPOTrainer:
             data_source_lst.append(test_batch.non_tensor_batch.get("data_source", ["unknown"] * reward_tensor.shape[0]))
 
         self._maybe_log_val_generations(inputs=sample_inputs, outputs=sample_outputs, scores=sample_scores)
+        self._maybe_print_val_generations(
+            inputs=sample_inputs,
+            outputs=sample_outputs,
+            gts=sample_gts,
+            scores=sample_scores,
+        )
 
         # dump generations
         val_data_dir = self.config.trainer.get("validation_data_dir", None)
@@ -963,6 +1008,7 @@ class RayPPOTrainer:
                 scores=sample_scores,
                 reward_extra_infos_dict=reward_extra_infos_dict,
                 dump_path=val_data_dir,
+                max_samples=self.config.trainer.get("validation_dump_generations", 0),
             )
 
         for key_info, lst in reward_extra_infos_dict.items():

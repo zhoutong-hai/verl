@@ -62,6 +62,11 @@ trainer:
   project_name: olmo3_7b_section3_chemistry
   experiment_name: olmo3_7b_section3_chemistry_grpo_fsdp
   logger: ["console", "wandb"]
+  log_val_generations: 8
+  print_val_generations: 2
+  validation_console_max_chars: 1200
+  validation_data_dir: ${oc.env:VALIDATION_DATA_DIR,null}
+  validation_dump_generations: 32
   nnodes: ${oc.decode:${oc.env:NNODES,1}}
   n_gpus_per_node: ${oc.decode:${oc.env:N_GPUS_PER_NODE,8}}
   save_freq: -1

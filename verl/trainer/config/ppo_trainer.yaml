@@ -143,11 +143,20 @@ trainer:
   # Number of generations to log during validation
   log_val_generations: 0
 
+  # Number of validation generations to print inline to the console
+  print_val_generations: 0
+
+  # Maximum number of characters to print per prompt/response in inline validation previews
+  validation_console_max_chars: 1200
+
   # Directory for logging rollout data; no dump if null
   rollout_data_dir: null
 
   # Directory for logging validation data; no dump if null
   validation_data_dir: null
+
+  # Maximum number of validation generations to dump to JSONL; 0 dumps all generations
+  validation_dump_generations: 0
 
   # Number of nodes used in the training
   nnodes: 1
