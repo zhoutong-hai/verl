@@ -80,6 +80,12 @@ sky launch -c verl-olmo3-chemistry examples/skypilot/verl-olmo3-section3-chemist
 ```
 Runs the fair FSDP-only Chemistry Section 3 comparison with `allenai/Olmo-3-7B-Instruct`. The YAML clones the same branch, downloads the OLMo checkpoint into `/hai/zhoutong/section3_chemistry_assets/models/Olmo-3-7B-Instruct` if it is missing, and uses `envs.VARIANT` to switch between `grpo_fsdp` and `sdpo_fsdp`.
 
+### OLMo-3-7B Physics Section 3 FSDP
+```bash
+sky launch -c verl-olmo3-physics examples/skypilot/verl-olmo3-section3-physics.yaml --secret WANDB_API_KEY -y
+```
+Runs the fair FSDP-only Physics Section 3 comparison with `allenai/Olmo-3-7B-Instruct`. The YAML clones the same branch, reuses the shared OLMo checkpoint under `/hai/zhoutong`, and uses `envs.VARIANT` to switch between `grpo_fsdp` and `sdpo_fsdp`. Validation generations are explicitly persisted so prompt/response samples can be reviewed after each run.
+
 ### Multi-turn Tool Usage Training
 ```bash
 sky launch -c verl-multiturn verl-multiturn-tools.yaml --secret WANDB_API_KEY --secret HF_TOKEN -y
