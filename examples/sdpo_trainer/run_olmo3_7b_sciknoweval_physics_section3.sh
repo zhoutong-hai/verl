@@ -79,4 +79,5 @@ export VALIDATION_DATA_DIR
 python3 -m verl.trainer.main_ppo \
   --config-name "$CONFIG_NAME" \
   trainer.experiment_name="$EXP_NAME" \
+  trainer.validation_data_dir="$VALIDATION_DATA_DIR" \
   "$@"

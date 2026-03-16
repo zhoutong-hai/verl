@@ -845,3 +845,103 @@ sequenceDiagram
     A-->>T: actor optimizer step finished
     A->>Ref: EMA update teacher weights
 ```
+
+## Appendix: SkyPilot Launch Chain and Env-Propagation Gotcha
+
+For the SkyPilot experiment launchers in this branch, the execution path is:
+
+```text
+sky launch
+  -> examples/skypilot/*.yaml
+  -> SkyPilot setup: clone repo, install verl, verify model/data
+  -> SkyPilot run: start custom Ray, log into W&B, export shell env
+  -> examples/sdpo_trainer/*.sh
+  -> python3 -m verl.trainer.main_ppo --config-name ...
+  -> Ray TaskRunner / worker processes
+```
+
+The important practical distinction is:
+
+- SkyPilot `envs:` are reliably available in the top-level `setup:` and `run:` shell.
+- They are not always reliable deep inside Ray worker processes when a Hydra config later resolves `${oc.env:...}`.
+
+That means a value can exist in the launcher shell but still disappear by the time a Ray worker evaluates the config.
+
+This came up in the OLMo Physics runs when validation samples were supposed to be dumped via:
+
+```yaml
+trainer:
+  validation_data_dir: ${oc.env:VALIDATION_DATA_DIR,null}
+```
+
+What happened:
+
+- the top-level `python3 -m verl.trainer.main_ppo` process had `VALIDATION_DATA_DIR`
+- validation definitely ran
+- but the Ray `TaskRunner` that executed `_validate()` did not have that env var
+- so `trainer.validation_data_dir` effectively resolved to `null` inside the worker
+- result: validation ran, but `_dump_generations()` never wrote `*.jsonl`
+
+The safer pattern for values that must survive into Ray workers is:
+
+- prefer a literal Hydra CLI override over a late `${oc.env:...}` lookup
+
+Example:
+
+```bash
+python3 -m verl.trainer.main_ppo \
+  --config-name "$CONFIG_NAME" \
+  trainer.experiment_name="$EXP_NAME" \
+  trainer.validation_data_dir="$VALIDATION_DATA_DIR"
+```
+
+Rule of thumb:
+
+- if a value is only needed in shell, env vars are fine
+- if a value must be consumed later inside Ray actors/workers, prefer a literal config value or CLI override
+
+This is especially relevant for:
+
+- dump paths like `validation_data_dir` or `rollout_data_dir`
+- experiment metadata that must be visible to remote workers
+- any path or flag that is resolved lazily by Hydra after Ray has spawned worker processes
+
+Executing an intermediate `*.sh` wrapper from the SkyPilot YAML adds another risk layer too.
+
+Why that is risky:
+
+- it creates one more boundary where env vars are transformed, defaulted, or dropped
+- shell fallback logic can quietly diverge from the actual Hydra config
+- values may exist in the wrapper shell but not in downstream Ray workers
+- debugging gets harder because the real runtime config is split across:
+  - SkyPilot YAML
+  - shell exports and conditionals
+  - trainer YAML
+  - Hydra CLI overrides
+- reproducibility gets worse because the exact effective config is harder to reconstruct from logs
+
+In other words, the full path becomes:
+
+```text
+SkyPilot YAML
+  -> shell env
+  -> bash wrapper logic
+  -> Hydra config + CLI overrides
+  -> Ray worker runtime
+```
+
+and each hop can mutate the final behavior.
+
+Safer patterns:
+
+- best for reproducibility:
+  - call `python3 -m verl.trainer.main_ppo ...` directly from the SkyPilot YAML
+  - keep important values as explicit Hydra CLI overrides
+- acceptable for convenience:
+  - keep a small wrapper script, but make it as thin and deterministic as possible
+  - avoid shell-only defaults for values that matter inside Ray workers
+  - print the final resolved command before execution
+- avoid:
+  - relying on `${oc.env:...}` for critical runtime values unless you know the Ray workers will inherit them
+
+For quick iteration, a wrapper script is still useful. But for longer-running experiments and especially large-scale launches, fewer configuration layers is usually the safer design.

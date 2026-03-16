@@ -8,7 +8,9 @@ cd "$REPO_ROOT"
 VARIANT="${VARIANT:-grpo_fsdp}"
 REMOTE_MODEL_PATH="/hai/zhoutong/section3_chemistry_assets/models/Olmo-3-7B-Instruct"
 REMOTE_CHEMISTRY_DATA_DIR="/hai/zhoutong/section3_chemistry_assets/data/sciknoweval_chemistry"
+REMOTE_VALIDATION_ROOT="/hai/zhoutong/section3_chemistry_assets/validation_generations"
 LOCAL_CHEMISTRY_DATA_DIR="/Users/zhoutong/code/SDPO/datasets/sciknoweval/chemistry"
+LOCAL_VALIDATION_ROOT="$REPO_ROOT/outputs/validation_generations"
 
 if [[ -z "${MODEL_PATH:-}" ]]; then
   if [[ -f "$REMOTE_MODEL_PATH/config.json" ]]; then
@@ -57,13 +59,25 @@ esac
 
 EXP_NAME="${EXP_NAME:-$DEFAULT_EXP_NAME}"
 
+if [[ -z "${VALIDATION_DATA_DIR:-}" ]]; then
+  if [[ "$CHEMISTRY_DATA_DIR" == /hai/* ]]; then
+    VALIDATION_DATA_DIR="$REMOTE_VALIDATION_ROOT/$EXP_NAME"
+  else
+    VALIDATION_DATA_DIR="$LOCAL_VALIDATION_ROOT/$EXP_NAME"
+  fi
+fi
+
+mkdir -p "$VALIDATION_DATA_DIR"
+
 export MODEL_PATH
 export CHEMISTRY_TRAIN_FILE
 export CHEMISTRY_VAL_FILE
 export N_GPUS_PER_NODE
 export NNODES
+export VALIDATION_DATA_DIR
 
 python3 -m verl.trainer.main_ppo \
   --config-name "$CONFIG_NAME" \
   trainer.experiment_name="$EXP_NAME" \
+  trainer.validation_data_dir="$VALIDATION_DATA_DIR" \
   "$@"
