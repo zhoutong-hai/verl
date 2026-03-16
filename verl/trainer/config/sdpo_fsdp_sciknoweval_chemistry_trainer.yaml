@@ -25,6 +25,7 @@ actor_rollout_ref:
     ppo_mini_batch_size: 32
     ppo_micro_batch_size_per_gpu: 1
     ppo_max_token_len_per_gpu: ${max_model_len}
+    clip_ratio_high: 0.28
     use_kl_loss: false
     policy_loss:
       loss_mode: sdpo
@@ -37,7 +38,9 @@ actor_rollout_ref:
       teacher_regularization: ema
       teacher_update_rate: 0.05
       dont_reprompt_on_self_success: true
+      remove_thinking_from_demonstration: true
       include_environment_feedback: false
+      environment_feedback_only_without_solution: true
       max_reprompt_len: 10240
       is_clip: 2.0
     optim:

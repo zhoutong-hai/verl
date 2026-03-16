@@ -98,7 +98,7 @@ sky launch -c verl-qwen3-chemistry-sdpo-megatron \
 - `perf/throughput`
 - `perf/time_per_step`
 
-## Current Status Snapshot (2026-03-15)
+## Current Status Snapshot (2026-03-16)
 
 ### Run 1 results (configs pre-alignment with upstream)
 
@@ -127,12 +127,68 @@ Our original SDPO configs diverged from the upstream Section 3 effective config 
 - **SDPO Megatron**: `alpha` 1.0 → 0.5, `success_reward_threshold` 1.0 → 0.5, added `vanilla_mbridge: false`
 - Note: Megatron keeps `full_logit_distillation: false` (raises `NotImplementedError`)
 
-### Run 2 corrected configs (in progress)
+### Additional FSDP alignment applied locally for the next rerun
 
-Both SDPO jobs relaunched with corrected configs:
-- `verl-qwen3-chemistry-sdpo` — SDPO FSDP with upstream-aligned config
-- `verl-qwen3-chemistry-sdpo-megatron` — SDPO Megatron with upstream-aligned config + mbridge fix
-- GRPO cluster still running (collapsed, kept for reference)
+- **GRPO FSDP**: `max_model_len` 10240 → 18944 to match the upstream Section 3 config family.
+- **GRPO FSDP**: `clip_ratio_high` 0.2 → 0.28 to match upstream `user.yaml`.
+- **SDPO FSDP**: `clip_ratio_high` 0.2 → 0.28 to match upstream `user.yaml`.
+- **SDPO FSDP**: `remove_thinking_from_demonstration` explicitly set to `true` to match upstream `actor.yaml`.
+- For the paper-style readout, we will compare the best `acc@16` within the first `1h` and `5h`, not only the final checkpoint.
+
+### Live cluster state
+
+All three chemistry clusters are currently `UP`, and each has an active running job:
+
+| Cluster | Variant | Job | Status | Latest visible step |
+|---------|---------|-----|--------|---------------------|
+| `verl-qwen3-chemistry-grpo` | GRPO FSDP | 2 | RUNNING | 334 / 1770 |
+| `verl-qwen3-chemistry-sdpo` | SDPO FSDP | 3 | RUNNING | 42 / 1770 |
+| `verl-qwen3-chemistry-sdpo-megatron` | SDPO Megatron | 3 | RUNNING | 39 / 1770 |
+
+### Latest metric snapshot
+
+#### `verl-qwen3-chemistry-grpo`
+
+- Best recent validation visible in the logs is healthy:
+  - `val-core/sciknoweval/acc/mean@16 = 0.4357` at step `330`
+  - `val-core/sciknoweval/acc/best@16/mean = 0.4777`
+  - `val-core/sciknoweval/acc/maj@16/mean = 0.4349`
+- Latest live training metrics at step `334`:
+  - `critic/score/mean = 0.3828`
+  - `actor/entropy = 0.0174`
+  - `perf/time_per_step = 98.3s`
+  - `perf/throughput = 576.8`
+- Current read: the corrected GRPO run is actively training and is far healthier than the earlier collapsed run.
+
+#### `verl-qwen3-chemistry-sdpo`
+
+- Early SDPO activation looked promising:
+  - step `5`: `self_distillation/reprompt_sample_fraction = 0.7344`
+  - step `5`: `val-core/sciknoweval/acc/mean@16 = 0.2896`
+  - step `5`: `val-core/sciknoweval/acc/best@16/mean = 0.8750`
+- Current state has collapsed again:
+  - step `42`: `self_distillation/reprompt_sample_fraction = 0.0`
+  - step `42`: `self_distillation/active_token_fraction = 0.0`
+  - step `42`: `self_distillation/empty_target_batch = 1.0`
+  - step `42`: `critic/score/mean = 0.0`
+  - step `42`: `actor/pg_loss = 0.0`, `actor/grad_norm = 0.0`
+- Latest visible validation remains zeroed:
+  - step `40`: `val-core/sciknoweval/acc/mean@16 = 0.0`
+
+#### `verl-qwen3-chemistry-sdpo-megatron`
+
+- Early Megatron SDPO activation also looked healthy:
+  - step `5`: `self_distillation/reprompt_sample_fraction = 0.7656`
+  - step `5`: `val-core/sciknoweval/acc/mean@16 = 0.2896`
+  - step `5`: `val-core/sciknoweval/acc/best@16/mean = 0.8750`
+- It has also drifted into an empty-target regime:
+  - step `39`: `self_distillation/reprompt_sample_fraction = 0.0`
+  - step `39`: `self_distillation/active_token_fraction = 0.0`
+  - step `39`: `self_distillation/empty_target_batch = 1.0`
+  - step `39`: `critic/score/mean = 0.0`
+  - step `39`: `actor/pg_loss = 0.0`, `actor/grad_norm = 0.0`
+- Latest visible validation is also zero:
+  - step `35`: `val-core/sciknoweval/acc/mean@16 = 0.0`
 
 #### SDPO FSDP corrected parameters (`sdpo_fsdp_sciknoweval_chemistry_trainer.yaml`)
 
@@ -318,3 +374,19 @@ Both SDPO jobs relaunched with corrected configs:
   - FSDP: `success_reward_threshold` 1.0 → 0.5
   - Megatron: `alpha` 1.0 → 0.5, `success_reward_threshold` 1.0 → 0.5, `vanilla_mbridge: false`
 - Both SDPO jobs relaunched.
+
+### [WIP] Corrected Run 2 status after relaunch
+
+- The relaunched GRPO run is now the healthiest of the three:
+  - still running at step `334`
+  - recent validation is around `0.436 acc@16`
+- Both SDPO variants showed good early activation and non-zero validation,
+  but both have now fallen into an empty-target regime:
+  - `reprompt_sample_fraction = 0.0`
+  - `active_token_fraction = 0.0`
+  - `empty_target_batch = 1.0`
+  - `critic/score/mean = 0.0`
+- This means the current active debugging target for the chemistry pilot is no
+  longer infrastructure or model init. It is the algorithmic/runtime reason
+  both SDPO variants stop seeing successful trajectories after the first few
+  dozen steps.

@@ -2,7 +2,7 @@ defaults:
   - ppo_trainer
   - _self_
 
-max_model_len: 10240
+max_model_len: 18944
 
 data:
   train_files: ["${oc.env:CHEMISTRY_DATA_DIR}/train.parquet"]
@@ -25,6 +25,7 @@ actor_rollout_ref:
     ppo_mini_batch_size: 32
     ppo_micro_batch_size_per_gpu: 1
     ppo_max_token_len_per_gpu: ${max_model_len}
+    clip_ratio_high: 0.28
     use_kl_loss: false
     optim:
       lr: 1e-5
