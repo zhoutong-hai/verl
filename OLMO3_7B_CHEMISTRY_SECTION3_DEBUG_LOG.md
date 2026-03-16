@@ -78,4 +78,4 @@ sky launch -c verl-olmo3-chemistry-sdpo \
 
 - Initial OLMo launcher version upgraded `huggingface_hub` to `1.7.1`.
 - That conflicts with the cluster image's `transformers==4.55.4` requirement of `huggingface-hub<1.0`.
-- Fix: remove the explicit upgrade from [verl-olmo3-section3-chemistry.yaml](/Users/zhoutong/code/verl/examples/skypilot/verl-olmo3-section3-chemistry.yaml) and rely on the image's existing compatible version.
+- Final fix: explicitly restore a compatible hub version with `huggingface_hub>=0.34.0,<1.0` in [verl-olmo3-section3-chemistry.yaml](/Users/zhoutong/code/verl/examples/skypilot/verl-olmo3-section3-chemistry.yaml), so reused clusters self-heal even if an earlier failed setup already mutated the Python environment.
