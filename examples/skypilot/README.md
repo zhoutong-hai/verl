@@ -74,6 +74,12 @@ sky launch -c verl-qwen3-chemistry examples/skypilot/verl-qwen3-section3-chemist
 ```
 Runs the Section 3 Chemistry pilot for `Qwen/Qwen3-8B` from the same branch. The YAML now expects pre-staged assets on the node under `/hai/zhoutong/section3_chemistry_assets/`, clones the fork branch, and uses `envs.VARIANT` to switch among `grpo_fsdp`, `sdpo_fsdp`, and `sdpo_megatron`.
 
+### OLMo-3-7B Chemistry Section 3 FSDP
+```bash
+sky launch -c verl-olmo3-chemistry examples/skypilot/verl-olmo3-section3-chemistry.yaml --secret WANDB_API_KEY -y
+```
+Runs the fair FSDP-only Chemistry Section 3 comparison with `allenai/Olmo-3-7B-Instruct`. The YAML clones the same branch, downloads the OLMo checkpoint into `/hai/zhoutong/section3_chemistry_assets/models/Olmo-3-7B-Instruct` if it is missing, and uses `envs.VARIANT` to switch between `grpo_fsdp` and `sdpo_fsdp`.
+
 ### Multi-turn Tool Usage Training
 ```bash
 sky launch -c verl-multiturn verl-multiturn-tools.yaml --secret WANDB_API_KEY --secret HF_TOKEN -y

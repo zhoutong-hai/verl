@@ -98,149 +98,206 @@ sky launch -c verl-qwen3-chemistry-sdpo-megatron \
 - `perf/throughput`
 - `perf/time_per_step`
 
-## Current Status Snapshot (2026-03-16)
+## Current Status Snapshot (2026-03-16, refreshed)
 
-### Run 1 results (configs pre-alignment with upstream)
+### Active Runs
 
-All three runs from the initial launch have failed or collapsed:
+The authoritative live state is:
 
-| Cluster | Variant | Status | Detail |
-|---------|---------|--------|--------|
-| `verl-qwen3-chemistry-grpo` | GRPO FSDP | Entropy collapse at step 257 | Score 0.515 → 0.004 in 2 steps |
-| `verl-qwen3-chemistry-sdpo` | SDPO FSDP | Death spiral from step ~19 | All self_distillation metrics zero; loss=0, grad_norm=0 |
-| `verl-qwen3-chemistry-sdpo-megatron` | SDPO Megatron | Crashed on init | `ModuleNotFoundError: megatron.core.distributed.custom_fsdp` |
+| Cluster | Variant | Job | Status | Notes |
+|---------|---------|-----|--------|-------|
+| `verl-qwen3-chemistry-grpo` | GRPO FSDP | `5` | `RUNNING` | Fairer rerun with upstream-aligned FSDP config |
+| `verl-qwen3-chemistry-sdpo` | SDPO FSDP | `4` | `RUNNING` | Fairer rerun with upstream-aligned FSDP config |
+| `verl-qwen3-chemistry-sdpo-megatron` | SDPO Megatron | `3` | `RUNNING` | Historical/debug arm still active on the older Megatron config |
 
-### Config mismatch with upstream
+### Latest Live Metrics
 
-Our original SDPO configs diverged from the upstream Section 3 effective config in critical ways:
+#### GRPO FSDP (`verl-qwen3-chemistry-grpo`, job `5`)
 
-| Parameter | Our original | Upstream effective | Source |
-|-----------|-------------|-------------------|--------|
-| `success_reward_threshold` | 1.0 | 0.5 | `actor.yaml` overrides dataclass default |
-| `alpha` | 1.0 (reverse KL) | 0.5 (JSD) | command-line in `run_sdpo_all.sh` |
-| `full_logit_distillation` | false | true | `actor.yaml` |
-| `distillation_topk` | not set | 100 | command-line in `run_sdpo_all.sh` |
+- Current visible step: `108`
+- Best visible validation so far: at step `105`
+  - `val-core/sciknoweval/acc/mean@16 = 0.4643`
+  - `val-core/sciknoweval/acc/best@16/mean = 0.7389`
+  - `val-core/sciknoweval/acc/maj@16/mean = 0.5238`
+- Latest training health:
+  - `critic/score/mean = 0.5508`
+  - `actor/entropy = 0.0210`
+  - `perf/throughput = 1300.9`
+- Main concern:
+  - `response_length/mean = 8192.0`
+  - `response_length/clip_ratio = 1.0`
+  - GRPO is learning, but it is currently maxing out the response budget on every visible batch.
 
-### Fixes applied (commit `0cb2fecb`)
+#### SDPO FSDP (`verl-qwen3-chemistry-sdpo`, job `4`)
 
-- **SDPO FSDP**: `success_reward_threshold` 1.0 → 0.5 (alpha/logit/topk were already aligned)
-- **SDPO Megatron**: `alpha` 1.0 → 0.5, `success_reward_threshold` 1.0 → 0.5, added `vanilla_mbridge: false`
-- Note: Megatron keeps `full_logit_distillation: false` (raises `NotImplementedError`)
+- Current visible step: `74`
+- Latest visible validation: at step `30`
+  - `val-core/sciknoweval/acc/mean@16 = 0.0`
+- Latest training health:
+  - `self_distillation/success_group_fraction = 0.0`
+  - `self_distillation/reprompt_sample_fraction = 0.0`
+  - `self_distillation/active_token_fraction = 0.0`
+  - `self_distillation/empty_target_batch = 1.0`
+  - `actor/pg_loss = 0.0`
+  - `actor/grad_norm = 0.0`
+- Main concern:
+  - the run is operationally alive, but it is still in the zero-target / zero-learning regime.
 
-### Additional FSDP alignment applied locally for the next rerun
+Validated score trajectory from W&B run `mw7q3350`:
 
-- **GRPO FSDP**: `max_model_len` 10240 → 18944 to match the upstream Section 3 config family.
-- **GRPO FSDP**: `clip_ratio_high` 0.2 → 0.28 to match upstream `user.yaml`.
-- **SDPO FSDP**: `clip_ratio_high` 0.2 → 0.28 to match upstream `user.yaml`.
-- **SDPO FSDP**: `remove_thinking_from_demonstration` explicitly set to `true` to match upstream `actor.yaml`.
-- For the paper-style readout, we will compare the best `acc@16` within the first `1h` and `5h`, not only the final checkpoint.
+| Step | `acc@16` | `success_group_fraction` | `reprompt_sample_fraction` | `critic/score/mean` | `response_length/mean` |
+|------|----------|--------------------------|----------------------------|---------------------|------------------------|
+| `5` | `0.2527` | `0.8125` | `0.7656` | `0.2031` | `1066.9` |
+| `10` | `0.0179` | `0.0625` | `0.0547` | `0.0078` | `1972.9` |
+| `15` | `0.0030` | `0.0` | `0.0` | `0.0` | `2983.4` |
+| `20` | `0.0003` | `0.0` | `0.0` | `0.0` | `3255.2` |
+| `25` | `0.0` | `0.0` | `0.0` | `0.0` | `3970.8` |
+| `30+` | `0.0` | `0.0` | `0.0` | `0.0` | `4043+` |
 
-### Live cluster state
+#### SDPO Megatron (`verl-qwen3-chemistry-sdpo-megatron`, job `3`)
 
-All three chemistry clusters are currently `UP`, and each has an active running job:
+- Current visible step: `119`
+- Latest visible training health:
+  - `self_distillation/success_group_fraction = 0.0`
+  - `self_distillation/reprompt_sample_fraction = 0.0`
+  - `self_distillation/active_token_fraction = 0.0`
+  - `self_distillation/empty_target_batch = 1.0`
+  - `actor/pg_loss = 0.0`
+  - `actor/grad_norm = 0.0`
+  - `self_distillation/teacher_update_rate = 0.05`
+  - teacher/actor parameter drift metrics are still being logged, so EMA is active
+- Main concern:
+  - like FSDP SDPO, Megatron SDPO is still running but has no active SDPO supervision in the visible window.
 
-| Cluster | Variant | Job | Status | Latest visible step |
-|---------|---------|-----|--------|---------------------|
-| `verl-qwen3-chemistry-grpo` | GRPO FSDP | 2 | RUNNING | 334 / 1770 |
-| `verl-qwen3-chemistry-sdpo` | SDPO FSDP | 3 | RUNNING | 42 / 1770 |
-| `verl-qwen3-chemistry-sdpo-megatron` | SDPO Megatron | 3 | RUNNING | 39 / 1770 |
+Validated score trajectory from W&B run `i7ydwmwo`:
 
-### Latest metric snapshot
+| Step | `acc@16` | `success_group_fraction` | `reprompt_sample_fraction` | `critic/score/mean` | `response_length/mean` |
+|------|----------|--------------------------|----------------------------|---------------------|------------------------|
+| `5` | `0.2735` | `0.8125` | `0.7656` | `0.2070` | `773.5` |
+| `10` | `0.0223` | `0.3750` | `0.3398` | `0.0625` | `2050.2` |
+| `15` | `0.0015` | `0.1250` | `0.1133` | `0.0195` | `6051.8` |
+| `20` | `0.0` | `0.0` | `0.0` | `0.0` | `5641.0` |
+| `25+` | `0.0` | `0.0` | `0.0` | `0.0` | `5460+` |
 
-#### `verl-qwen3-chemistry-grpo`
+### Current Diagnosis Of The SDPO Collapse
 
-- Best recent validation visible in the logs is healthy:
-  - `val-core/sciknoweval/acc/mean@16 = 0.4357` at step `330`
-  - `val-core/sciknoweval/acc/best@16/mean = 0.4777`
-  - `val-core/sciknoweval/acc/maj@16/mean = 0.4349`
-- Latest live training metrics at step `334`:
-  - `critic/score/mean = 0.3828`
-  - `actor/entropy = 0.0174`
-  - `perf/time_per_step = 98.3s`
-  - `perf/throughput = 576.8`
-- Current read: the corrected GRPO run is actively training and is far healthier than the earlier collapsed run.
+The collapse pattern is now directly verified for both SDPO runs:
 
-#### `verl-qwen3-chemistry-sdpo`
+1. The runs start with a healthy pocket of successful samples.
+2. Within 5-10 validation intervals, both the reward signal and the SDPO target supply collapse.
+3. Once `success_group_fraction` hits `0`, `reprompt_sample_fraction` also hits `0`.
+4. That makes `self_distillation_mask` empty, so SDPO loss becomes exactly `0`.
+5. After that, `actor/pg_loss`, `actor/grad_norm`, and `critic/score/mean` all stay at `0`, so the run cannot recover on its own.
 
-- Early SDPO activation looked promising:
-  - step `5`: `self_distillation/reprompt_sample_fraction = 0.7344`
-  - step `5`: `val-core/sciknoweval/acc/mean@16 = 0.2896`
-  - step `5`: `val-core/sciknoweval/acc/best@16/mean = 0.8750`
-- Current state has collapsed again:
-  - step `42`: `self_distillation/reprompt_sample_fraction = 0.0`
-  - step `42`: `self_distillation/active_token_fraction = 0.0`
-  - step `42`: `self_distillation/empty_target_batch = 1.0`
-  - step `42`: `critic/score/mean = 0.0`
-  - step `42`: `actor/pg_loss = 0.0`, `actor/grad_norm = 0.0`
-- Latest visible validation remains zeroed:
-  - step `40`: `val-core/sciknoweval/acc/mean@16 = 0.0`
+The most concrete correlated symptoms are:
 
-#### `verl-qwen3-chemistry-sdpo-megatron`
+- response length rises sharply as accuracy collapses
+- the Chemistry XML answer-format metric also collapses to nearly `0` early
 
-- Early Megatron SDPO activation also looked healthy:
-  - step `5`: `self_distillation/reprompt_sample_fraction = 0.7656`
-  - step `5`: `val-core/sciknoweval/acc/mean@16 = 0.2896`
-  - step `5`: `val-core/sciknoweval/acc/best@16/mean = 0.8750`
-- It has also drifted into an empty-target regime:
-  - step `39`: `self_distillation/reprompt_sample_fraction = 0.0`
-  - step `39`: `self_distillation/active_token_fraction = 0.0`
-  - step `39`: `self_distillation/empty_target_batch = 1.0`
-  - step `39`: `critic/score/mean = 0.0`
-  - step `39`: `actor/pg_loss = 0.0`, `actor/grad_norm = 0.0`
-- Latest visible validation is also zero:
-  - step `35`: `val-core/sciknoweval/acc/mean@16 = 0.0`
+For the current FSDP run, the validation-side format metric goes:
 
-#### SDPO FSDP corrected parameters (`sdpo_fsdp_sciknoweval_chemistry_trainer.yaml`)
+- step `5`: `0.4060`
+- step `10`: `0.0012`
+- step `15+`: `0.0`
 
-| Parameter | Value | Notes |
-|-----------|-------|-------|
-| `alpha` | 0.5 | JSD (matches upstream) |
-| `success_reward_threshold` | 0.5 | Matches upstream `actor.yaml` |
-| `full_logit_distillation` | true | Matches upstream |
-| `distillation_topk` | 100 | Matches upstream |
-| `dont_reprompt_on_self_success` | true | Matches upstream |
-| `include_environment_feedback` | false | Matches upstream |
-| `teacher_scoring_mode` | actor_worker | FSDP-native teacher path |
-| `teacher_regularization` | ema | |
-| `teacher_update_rate` | 0.05 | |
-| `use_kl_loss` | false | |
-| `lr` | 1e-5 | |
-| `train_batch_size` | 32 | |
-| `rollout.n` | 8 | |
-| `ppo_mini_batch_size` | 32 | |
+For the current Megatron run, it goes:
 
-#### SDPO Megatron corrected parameters (`sdpo_megatron_sciknoweval_chemistry_trainer.yaml`)
+- step `5`: `0.5688`
+- step `10`: `0.0176`
+- step `15`: `0.0003`
+- step `20+`: `0.0`
 
-| Parameter | Value | Notes |
-|-----------|-------|-------|
-| `alpha` | 1.0 | Reverse KL (required when `full_logit_distillation: false`) |
-| `success_reward_threshold` | 0.5 | Matches upstream `actor.yaml` |
-| `full_logit_distillation` | false | Megatron limitation (`NotImplementedError`); forces `alpha=1.0` |
-| `dont_reprompt_on_self_success` | true | Matches upstream |
-| `include_environment_feedback` | false | Matches upstream |
-| `teacher_scoring_mode` | trainer_ref | Megatron teacher path |
-| `teacher_regularization` | ema | |
-| `teacher_update_rate` | 0.05 | |
-| `vanilla_mbridge` | false | Fixes `custom_fsdp` crash on megatron-core 0.15.0 |
-| `use_kl_loss` | false | |
-| `lr` | 1e-5 | |
-| `train_batch_size` | 32 | |
-| `rollout.n` | 8 | |
-| `ppo_mini_batch_size` | 32 | |
+Important note: in [mcq.py](/Users/zhoutong/code/verl/verl/utils/reward_score/feedback/mcq.py), `incorrect_format` is currently misnamed. A logged value of `1` actually means the response matched the required trailing XML answer format.
 
-#### GRPO FSDP parameters (`grpo_fsdp_sciknoweval_chemistry_trainer.yaml`, unchanged)
+### Historical Summary
 
-| Parameter | Value | Notes |
-|-----------|-------|-------|
-| `adv_estimator` | grpo | |
-| `use_kl_loss` | false | No KL regularization |
-| `use_kl_in_reward` | false | |
-| `lr` | 1e-5 | Upstream also sweeps 1e-6 |
-| `train_batch_size` | 32 | |
-| `rollout.n` | 8 | |
-| `ppo_mini_batch_size` | 32 | |
-| `rollout_is` | token | |
-| `rollout_is_threshold` | 2.0 | |
+#### Run 1: initial chemistry pilot
+
+All three first-wave runs failed or collapsed:
+
+| Cluster | Variant | Outcome |
+|---------|---------|---------|
+| `verl-qwen3-chemistry-grpo` | GRPO FSDP | Entropy collapse at step `257` |
+| `verl-qwen3-chemistry-sdpo` | SDPO FSDP | Zero-target death spiral by step `~19` |
+| `verl-qwen3-chemistry-sdpo-megatron` | SDPO Megatron | Init crash on `megatron.core.distributed.custom_fsdp` |
+
+#### Run 2: corrected SDPO config, before final FSDP fairness cleanup
+
+- GRPO became much healthier and reached roughly `0.48 acc@16` by step `340+`.
+- Both SDPO variants still collapsed after showing good early activation.
+- Megatron remained useful for debugging, but the fairest paper-style comparison should focus on FSDP.
+
+#### Run 3: current fairer FSDP reruns
+
+These reruns incorporate the final FSDP alignment changes:
+
+- `max_model_len=18944` for GRPO
+- `clip_ratio_high=0.28` for both FSDP configs
+- `remove_thinking_from_demonstration=true` for FSDP SDPO
+- paper-style evaluation target: best `val-core/sciknoweval/acc/mean@16` within `1h` and `5h`
+
+### Current FSDP Config Summary
+
+#### GRPO FSDP
+
+| Parameter | Value |
+|-----------|-------|
+| `train_batch_size` | `32` |
+| `rollout.n` | `8` |
+| `ppo_mini_batch_size` | `32` |
+| `lr` | `1e-5` |
+| `clip_ratio_high` | `0.28` |
+| `max_model_len` | `18944` |
+| `use_kl_loss` | `false` |
+| `use_kl_in_reward` | `false` |
+
+#### SDPO FSDP
+
+| Parameter | Value |
+|-----------|-------|
+| `train_batch_size` | `32` |
+| `rollout.n` | `8` |
+| `ppo_mini_batch_size` | `32` |
+| `lr` | `1e-5` |
+| `clip_ratio_high` | `0.28` |
+| `alpha` | `0.5` |
+| `full_logit_distillation` | `true` |
+| `distillation_topk` | `100` |
+| `success_reward_threshold` | `0.5` |
+| `teacher_update_rate` | `0.05` |
+| `dont_reprompt_on_self_success` | `true` |
+| `remove_thinking_from_demonstration` | `true` |
+| `include_environment_feedback` | `false` |
+
+### Verified Upstream OLMo Reference
+
+Verified from public W&B run [`jonhue/SDPO/xjiucmxw`](https://wandb.ai/jonhue/SDPO/runs/xjiucmxw):
+
+- model: `allenai/Olmo-3-7B-Instruct`
+- dataset: `sciknoweval/chemistry_filtered`
+- hardware: `1` node, `4` GPUs
+- run state: `crashed`
+- matching SDPO knobs:
+  - `alpha=0.5`
+  - `full_logit_distillation=true`
+  - `distillation_topk=100`
+  - `success_reward_threshold=0.5`
+  - `remove_thinking_from_demonstration=true`
+  - `clip_ratio_high=0.28`
+  - `loss_agg_mode=token-mean`
+  - validation `n=16`
+
+Verified OLMo metric points:
+
+| Metric | Step `5` | Step `40` | Step `50` | Step `150` |
+|--------|----------|-----------|-----------|------------|
+| `critic/score/mean` | `0.2930` | `0.7148` | `0.6445` | `0.7383` |
+| `actor/entropy` | `0.9173` | `1.1950` | `1.0797` | `1.1535` |
+| `response_length/mean` | `692.72` | `210.55` | `202.92` | `166.54` |
+| `response_length/clip_ratio` | `0.0039` | `0.0` | `0.0` | `0.0` |
+| `success_group_fraction` | `0.7188` | `0.7813` | `0.8125` | `0.8125` |
+| `reprompt_sample_fraction` | `0.6992` | `0.7773` | `0.8008` | `0.8047` |
+| `val acc@16` | `0.3592` | `0.6967` | `0.7116` | `0.7961` |
 
 ## Debug Notes
 
@@ -372,7 +429,9 @@ All three chemistry clusters are currently `UP`, and each has an active running 
   - `dont_reprompt_on_self_success: true` (from command-line)
 - Applied fixes in commit `0cb2fecb`:
   - FSDP: `success_reward_threshold` 1.0 → 0.5
-  - Megatron: `alpha` 1.0 → 0.5, `success_reward_threshold` 1.0 → 0.5, `vanilla_mbridge: false`
+  - Megatron: `success_reward_threshold` 1.0 → 0.5, `vanilla_mbridge: false`
+  - Note: the current Megatron chemistry config still uses `alpha: 1.0`
+    because `full_logit_distillation: false` remains a Megatron limitation.
 - Both SDPO jobs relaunched.
 
 ### [WIP] Corrected Run 2 status after relaunch
@@ -390,3 +449,254 @@ All three chemistry clusters are currently `UP`, and each has an active running 
   longer infrastructure or model init. It is the algorithmic/runtime reason
   both SDPO variants stop seeing successful trajectories after the first few
   dozen steps.
+
+### [WIP] FSDP-only reruns launched with fairer upstream alignment
+
+- Pushed config alignment commit: `9a1dbf9c`
+- Reused the same cluster names to preserve history:
+  - `verl-qwen3-chemistry-grpo`
+  - `verl-qwen3-chemistry-sdpo`
+- Canceled the blocking previous jobs before relaunch:
+  - GRPO: canceled job `2`, new job is `5`
+  - SDPO: canceled job `3`, new job is `4`
+- Current relaunch snapshot:
+  - `verl-qwen3-chemistry-grpo` job `5`: `RUNNING`
+  - `verl-qwen3-chemistry-sdpo` job `4`: `RUNNING`
+- These reruns include the final FSDP alignment changes:
+  - `remove_thinking_from_demonstration=true` for SDPO
+  - `clip_ratio_high=0.28` for both FSDP configs
+  - `max_model_len=18944` for GRPO
+- Evaluation target for this round:
+  - compare the best `val-core/sciknoweval/acc/mean@16` within the first `1h`
+  - compare again within the first `5h`
+
+### [WIP] Cross-validated hypothesis: long-response dilution is a major contributor to SDPO collapse
+
+#### Summary
+
+Both SDPO variants (FSDP and Megatron) collapse to zero score within ~12 training
+steps despite starting with healthy self-distillation activation. A strong
+working hypothesis is that Qwen3-8B's much longer responses make the SDPO loss
+harder to optimize: our Qwen3 run often produces multi-thousand-token responses,
+while the public author run on `allenai/Olmo-3-7B-Instruct` converges to short
+~200-token responses. Because SDPO uses token-mean aggregation over all active
+response tokens, long reasoning traces can dilute answer-relevant supervision.
+
+This hypothesis is supported by code inspection and by the public OLMo run, but
+it is **not yet proven as the unique root cause**. The comparison is confounded
+by both model choice (`Qwen3-8B` vs `Olmo-3-7B-Instruct`) and dataset split
+(`chemistry` vs `chemistry_filtered`).
+
+#### SDPO FSDP (Qwen3-8B) — Step-by-step collapse trajectory
+
+The SDPO FSDP run (job 3, corrected config with `success_reward_threshold: 0.5`)
+**did NOT cold-start**. It began with strong self-distillation activation that
+then rapidly collapsed:
+
+| Step | Score | Success Groups | Entropy | pg_loss | grad_norm | Active Token Frac |
+|------|-------|---------------|---------|---------|-----------|-------------------|
+| 1    | 0.227 | **71.9%** | 1.53 | 0.436 | 1.03 | 69.5% |
+| 2    | 0.246 | **71.9%** | 1.71 | 0.256 | 0.58 | 69.5% |
+| 3    | 0.188 | **84.4%** | 1.87 | 0.444 | 1.20 | 80.1% |
+| 4    | 0.231 | **93.8%** | 1.85 | 0.425 | 0.81 | 87.9% |
+| 5    | 0.180 | **78.1%** | 1.93 | 0.326 | 0.70 | 73.4% |
+| 6    | 0.148 | **71.9%** | 1.54 | 0.259 | 0.65 | 67.6% |
+| 7    | 0.109 | **62.5%** | 1.69 | 0.327 | 0.62 | 57.0% |
+| 8    | 0.051 | 21.9% | 2.23 | 0.015 | 0.08 | 21.1% |
+| 9    | 0.008 | 6.3% | 2.33 | 0.002 | 0.02 | 5.5% |
+| 10   | 0.012 | 9.4% | 2.76 | 0.004 | 0.05 | 8.2% |
+| 11   | 0.004 | 3.1% | 2.91 | 0.000 | 0.01 | 2.7% |
+| 12   | 0.008 | 6.3% | 3.04 | 0.004 | 0.04 | 5.5% |
+| **13** | **0.0** | **0%** | 3.11 | 0.0 | 0.0 | 0% |
+| 14+  | **0.0** | **0%** | ~4.5+ | 0.0 | 0.0 | 0% |
+
+The **entropy explosion** from 1.53 → 4.6+ is the smoking gun: the distillation
+loss is making the model *more random*, not more focused. Once the model
+becomes too random to score on any rollout, `self_distillation_mask` goes to
+all zeros and the model is permanently stuck (no GRPO fallback in SDPO mode).
+
+#### Verified public OLMo-3-7B-Instruct SDPO reference run
+
+Reference: W&B run `jonhue/SDPO/xjiucmxw`
+(`FINAL-SDPO-train32-alpha0.5-rollout8-lr1e-5-drossTrue-allenai-Olmo-3-7B-Instruct`)
+
+The following items are directly verified from the public W&B API:
+
+- run state: `crashed`
+- model: `allenai/Olmo-3-7B-Instruct`
+- dataset: `sciknoweval/chemistry_filtered`
+- hardware: `1` node, `4` GPUs
+- SDPO config:
+  - `alpha: 0.5`
+  - `full_logit_distillation: true`
+  - `distillation_topk: 100`
+  - `success_reward_threshold: 0.5`
+  - `dont_reprompt_on_self_success: true`
+  - `remove_thinking_from_demonstration: true`
+  - `clip_ratio_high: 0.28`
+  - `loss_agg_mode: token-mean`
+  - validation `n: 16`
+
+Verified OLMo metric points from the public run:
+
+| Metric | OLMo step 5 | OLMo step 40 | OLMo step 50 | OLMo step 150 |
+|--------|-------------|--------------|--------------|---------------|
+| `critic/score/mean` | 0.2930 | 0.7148 | 0.6445 | 0.7383 |
+| `actor/entropy` | 0.9173 | 1.1950 | 1.0797 | 1.1535 |
+| `response_length/mean` | 692.72 | 210.55 | 202.92 | 166.54 |
+| `response_length/clip_ratio` | 0.0039 | 0.0 | 0.0 | 0.0 |
+| `success_group_fraction` | 0.7188 | 0.7813 | 0.8125 | 0.8125 |
+| `reprompt_sample_fraction` | 0.6992 | 0.7773 | 0.8008 | 0.8047 |
+| `actor/pg_loss` | 0.0529 | 0.0220 | 0.0196 | 0.0098 |
+| `actor/grad_norm` | 0.2187 | 0.1022 | 0.0893 | 0.0626 |
+| `val acc@16` | 0.3592 | 0.6967 | 0.7116 | 0.7961 |
+| `val best@16` | 0.7748 | 0.7814 | 0.7867 | 0.8334 |
+
+By contrast, our Qwen3 SDPO run collapses from healthy early activation to zero
+score by roughly step `13`, while still producing far longer responses. The
+response-length gap is real and large, but it should be interpreted as a strong
+correlate, not yet a proven single-cause explanation.
+
+#### Root cause analysis
+
+Five compounding factors were identified by tracing the full distillation loss
+computation path:
+
+**1. Token-mean aggregation dilutes the answer signal (~34x)**
+
+The loss uses `loss_agg_mode: "token-mean"` (the default, not overridden in any
+chemistry config):
+
+```
+loss = sum(per_token_loss for all active tokens) / total_active_tokens
+```
+
+All response tokens contribute equally. With Qwen3-8B's ~5800 tokens per response
+(vs OLMo's ~170), the gradient from answer-relevant tokens is diluted by a factor
+of ~34x. There is no mechanism to weight answer tokens differently from
+thinking/filler tokens.
+
+Source: `verl/trainer/ppo/core_algos.py` lines 965–970, `agg_loss()` at lines
+773–828.
+
+**2. Self-distillation mask is per-sample, not per-token**
+
+The `self_distillation_mask` is a `[batch_size]` tensor that masks entire
+sequences. When a sample is selected for distillation, ALL of its ~5800
+response tokens contribute to the loss.
+
+Source: `verl/trainer/ppo/ray_trainer.py` lines 798–802 (mask construction),
+`core_algos.py` lines 848–849 (`loss_mask * self_distillation_mask.unsqueeze(1)`).
+
+**3. Teacher sees an enriched prompt (context mismatch)**
+
+The teacher evaluates the student's response tokens under a *different* prompt
+that includes a successful sibling's full response as a demonstration:
+
+```
+{original prompt}
+
+Correct solution:
+
+{successful sibling's full response (~5800 tokens)}
+
+Correctly solve the original question.
+```
+
+The student generated its tokens under the original prompt only. This context
+mismatch means the teacher and student assign very different probabilities to
+thinking/reasoning tokens. The distillation loss pushes the student to match
+the teacher's context-mismatched distribution across all 5800 tokens.
+
+Source: `verl/trainer/ppo/ray_trainer.py` lines 728–756
+(`_build_teacher_message`), lines 780–784 (teacher input construction).
+
+**4. JSD over top-100 logits on long noisy responses may encourage entropy growth**
+
+With `full_logit_distillation: true`, `alpha: 0.5` (JSD), and
+`distillation_topk: 100`, the per-token Jensen–Shannon divergence is computed
+over the top-100 vocabulary items. On tokens where teacher and student contexts
+differ sharply, this may push the student toward a more diffuse distribution.
+This is a plausible explanation for the observed entropy growth, but we do not
+yet have a controlled ablation proving that this is the dominant driver.
+
+Source: `verl/trainer/ppo/core_algos.py` lines 857–906 (top-k JSD
+computation).
+
+**5. SDPO completely bypasses the GRPO policy gradient**
+
+When `loss_mode="sdpo"`, the actor enters the `if self_distillation_enabled:`
+branch and **completely skips** the standard GRPO policy loss. The only
+learning signal comes from `compute_self_distillation_loss()`. Once the
+distillation mask goes to all zeros (no successful rollouts), the model
+receives exactly zero gradient — there is no GRPO fallback.
+
+Source: `verl/workers/actor/dp_actor.py` lines 819–860 (SDPO branch) vs
+lines 861–876 (GRPO `else` branch).
+
+#### Additional notes on FSDP vs Megatron teacher paths
+
+- **FSDP** (`teacher_scoring_mode: actor_worker`): Uses a true EMA teacher
+  (`teacher_update_rate: 0.05`) that tracks the student. As the student
+  degrades, the teacher follows within ~20 steps → death spiral.
+  Source: `verl/workers/actor/dp_actor.py` lines 133–156 (`_update_teacher`).
+
+- **Megatron** (`teacher_scoring_mode: trainer_ref`): Uses the trainer-side
+  reference path for teacher scoring, but the underlying `ref_module` on the
+  Megatron worker is still updated by EMA in `megatron_workers.py`. So this is
+  **not a frozen teacher** in the current branch.
+
+#### Metric definitions
+
+For reference, the key self-distillation metrics are computed as follows
+(source: `verl/trainer/ppo/ray_trainer.py` lines 811–822):
+
+- **`success_group_fraction`**: Fraction of unique UIDs (prompts) that have at
+  least one rollout scoring ≥ `success_reward_threshold`. A "group" is all
+  `n=8` rollouts from the same prompt.
+
+- **`success_sample_fraction`**: Fraction of individual samples that were
+  assigned a distillation target (a successful sibling's response). With
+  `dont_reprompt_on_self_success: true`, a sample's own success doesn't count —
+  it needs a *different* rollout in its group to have succeeded.
+
+- **`active_token_fraction`**: Fraction of all response tokens that are inside
+  samples with `self_distillation_mask = 1` (i.e., samples eligible for
+  distillation).
+
+- **`empty_target_batch`**: `1.0` when `self_distillation_mask.sum() == 0`
+  (no samples in the batch have a distillation target). When this is `1.0`,
+  the loss is exactly 0.0 and no gradient flows.
+
+Source for `_collect_solutions_by_uid`: `ray_trainer.py` lines 620–629.
+The threshold comparison is on `reward_tensor.sum(dim=-1)` (per-sequence
+reward sum).
+
+### [Resolved] Cross-validation review of the OLMo-based diagnosis
+
+- The following parts are well supported by the code:
+  - `loss_agg_mode: token-mean` does average over all active response tokens.
+  - `self_distillation_mask` is per-sample and is broadcast across tokens.
+  - the teacher scores the student's response under an enriched reprompted context.
+  - SDPO bypasses the normal GRPO policy-gradient branch when `loss_mode="sdpo"`.
+- The following parts should be treated as hypotheses, not established root causes:
+  - "long-response dilution is the root cause" is plausible, but not isolated.
+    The comparison is confounded by both model choice (`Qwen3-8B` vs
+    `Olmo-3-7B-Instruct`) and dataset split (`chemistry` vs the earlier observed
+    `chemistry_filtered` upstream path).
+  - the entropy-explosion explanation for top-k JSD on long responses is
+    plausible, but we do not yet have a controlled ablation proving it.
+- One claim in the finding is incorrect for this branch:
+  - Megatron `teacher_scoring_mode: trainer_ref` does **not** imply a frozen
+    teacher. The Megatron worker still applies EMA updates to `ref_module` in
+    `megatron_workers.py`, so the teacher can drift and improve over time.
+- There are also stale/inconsistent entries elsewhere in this log that should
+  not be treated as the latest truth:
+  - the earlier "Live cluster state" section still references pre-rerun job IDs
+    `2/3`, while the current reruns are job `5` (GRPO) and job `4` (SDPO).
+  - the earlier "Fixes applied" note says Megatron `alpha` was moved to `0.5`,
+    but the current Megatron chemistry config is `alpha: 1.0` because
+    `full_logit_distillation: false` is still enforced there.
+- Extra caution on metric interpretation:
+  - the `incorrect_format` field in `feedback/mcq.py` is currently named
+    misleadingly; it is set to `1` when the answer format is actually correct.
