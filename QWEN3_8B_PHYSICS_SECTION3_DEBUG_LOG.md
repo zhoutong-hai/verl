@@ -442,3 +442,26 @@ sky launch -c verl-olmo3-physics \
     - the off-by-one alignment failure is gone
     - the missing `response_mask` failure in the ref-worker teacher-scoring path is gone
   - the next meaningful checkpoint is the first validation at step `5`
+
+### [Resolved Locally] Packed-vs-response top-k tensor shape mismatch after step 11
+
+- The latest rerun did not die from vanishing gradients. It trained through step `11` and logged:
+  - `val-core/sciknoweval/acc/mean@16 = 0.596875`
+  - `val-core/sciknoweval/acc/best@16/mean = 0.8138625`
+  - `val-core/sciknoweval/acc/maj@16/mean = 0.61215`
+- It then crashed in `actor_rollout_ref_update_actor()` with:
+  - `RuntimeError: shape mismatch: value tensor of shape [8192, 100] cannot be broadcast to indexing result of shape [8460, 100]`
+- Crash path:
+  - `verl/workers/actor/megatron_actor.py`
+  - `verl/models/mcore/model_forward.py`
+  - `verl/models/mcore/util.py::postprocess_packed_seqs`
+- Diagnosis:
+  - the Megatron SDPO branch was building `topk_log_probs` in response-aligned form (`[bs, response_len, k]`) inside `logits_processor`
+  - but the MCore forward wrapper still assumes every returned tensor is packed sequence-aligned and runs `postprocess_packed_seqs(...)` on it
+  - so the postprocess step tried to scatter a response-length tensor into a packed sequence-length slot
+- Local fix applied:
+  - keep the teacher lookup keyed by the response-aligned teacher support
+  - but write the gathered student top-k log-probs back into a packed sequence-aligned tensor at the active `label_mask` positions
+  - do the same for `topk_indices` when requested
+- Expected effect:
+  - the MCore postprocess path and later Megatron loss slicing should now see consistent tensor layouts

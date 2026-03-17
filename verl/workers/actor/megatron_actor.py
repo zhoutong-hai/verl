@@ -809,15 +809,21 @@ class MegatronPPOActor(BasePPOActor):
                                 active_full_logits, dim=-1, index=active_teacher_topk_indices
                             )
                             active_logsumexp = torch.logsumexp(active_full_logits, dim=-1, keepdim=True)
-                            response_aligned_topk = torch.zeros(
-                                current_topk_indices.shape,
+                            packed_topk_log_probs = torch.zeros(
+                                (*active_label_mask.shape, current_topk_indices.size(-1)),
                                 dtype=active_topk_logits.dtype,
                                 device=full_logits.device,
                             )
-                            response_aligned_topk[current_response_mask] = active_topk_logits - active_logsumexp
-                            ret["topk_log_probs"] = response_aligned_topk
+                            packed_topk_log_probs[active_label_mask] = active_topk_logits - active_logsumexp
+                            ret["topk_log_probs"] = packed_topk_log_probs
                             if return_topk_indices:
-                                ret["topk_indices"] = current_topk_indices
+                                packed_topk_indices = torch.zeros(
+                                    (*active_label_mask.shape, current_topk_indices.size(-1)),
+                                    dtype=current_topk_indices.dtype,
+                                    device=full_logits.device,
+                                )
+                                packed_topk_indices[active_label_mask] = active_teacher_topk_indices
+                                ret["topk_indices"] = packed_topk_indices
                     return ret
 
                 logits_processor_args = {"label": label, "label_mask": label_mask}
