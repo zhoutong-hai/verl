@@ -330,3 +330,49 @@ sky launch -c verl-olmo3-physics \
   - the previous `torch.gather(... teacher_topk_indices ...)` size-mismatch crash has not reappeared
   - but the job has not yet emitted `training/global_step` or validation metrics either
 - So the immediate shape-mismatch failure appears resolved, but runtime verification is still incomplete until the rerun reaches the first actor update and logs a step.
+
+### [Current Status] Previous gather crash is fixed, but the rerun still fails on a response-token alignment check
+
+- Latest rerun:
+  - `/root/sky_logs/manual-megatron-20260317_185859/run.log`
+- The earlier failure:
+  - `expected index [1, 8192, 100] to be no larger than self [1, 240, 151936]`
+  - no longer appears
+- New failure from the same first actor update:
+  - `ValueError: Packed Megatron logits and response_mask disagree on active response tokens: 106 vs 105.`
+  - variants of the same off-by-one mismatch also appeared:
+    - `88 vs 87`
+    - `101 vs 100`
+- Crash site:
+  - `verl/workers/actor/megatron_actor.py`, inside the new response-alignment branch in `logits_processor`
+- Interpretation:
+  - the major padded-vs-packed mismatch is resolved
+  - but there is still a boundary/alignment bug between:
+    - the packed Megatron sequence representation
+    - the response-window view carried by `response_mask`
+  - the mismatch is now consistently `1` token, which strongly suggests a shifted boundary issue rather than a general shape error
+- Current job outcome:
+  - no `training/global_step`
+  - no validation metrics
+  - the rerun dies during the first `actor_rollout_ref_update_actor()` call
+
+### [Resolved Locally] Off-by-one came from Megatron `label_mask` including one extra token for short responses
+
+- Root cause:
+  - Megatron was building `label_mask` from the full `attention_mask` via:
+    - keep positions `[-response_length - 1 : -1]`
+    - clear the final sequence token
+  - this only gives the right count when the response fully fills the padded response window
+  - for shorter responses, it marks:
+    - the prompt token immediately before the response
+    - every valid response token
+  - which is `r + 1` active positions for a response with `r` valid tokens
+- Why the mismatch showed up as `106 vs 105`:
+  - `response_mask.sum()` counts the real response tokens
+  - `label_mask.sum()` counted one extra prediction slot whenever the response ended before the padded window ended
+- Local fix applied in `megatron_actor.py`:
+  - construct `label_mask` as an explicit one-token-left shift of `response_mask`
+  - this gives exactly one active prediction position per real response token, even when the response is shorter than the padded response window
+- Expected effect:
+  - packed active logits and response-aligned teacher top-k support should now match exactly
+  - the first Megatron actor update should get past the previous off-by-one assertion

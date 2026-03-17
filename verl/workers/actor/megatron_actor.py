@@ -705,9 +705,12 @@ class MegatronPPOActor(BasePPOActor):
             response_length = responses.size(1)
             label = position_ids.clone()
             label[:, -response_length - 1 : -1] = responses
-            label_mask = attention_mask.clone()
-            label_mask[:, : -response_length - 1] = False
-            label_mask[:, -1] = False
+            response_mask = batch["response_mask"].to(device=attention_mask.device, dtype=torch.bool)
+            # Score each real response token against the preceding sequence position. This is a one-token-left
+            # shift of the response mask and avoids the r+1 off-by-one that appears when responses are shorter than
+            # the padded response window.
+            label_mask = torch.zeros_like(attention_mask, dtype=torch.bool)
+            label_mask[:, -response_length - 1 : -1] = response_mask
 
             if RouterReplayHelper.is_replay_backward_action(self.tf_config, vp_rank):
                 router_instance_list = RouterReplayHelper.get_micro_batch_router_list(self.tf_config, vp_rank)
@@ -787,17 +790,17 @@ class MegatronPPOActor(BasePPOActor):
                         else:
                             # trainer_ref teacher targets are response-aligned [bs, response_len, k], while the
                             # packed Megatron logits here are sequence-aligned [bs, active_seq_len, vocab].
-                            response_mask = batch["response_mask"].to(device=full_logits.device, dtype=torch.bool)
-                            active_label_mask = label_mask.to(dtype=torch.bool)
+                            current_response_mask = response_mask.to(device=full_logits.device)
+                            active_label_mask = label_mask.to(device=full_logits.device)
                             active_token_count = int(active_label_mask.sum().item())
-                            response_token_count = int(response_mask.sum().item())
+                            response_token_count = int(current_response_mask.sum().item())
                             if active_token_count != response_token_count:
                                 raise ValueError(
                                     "Packed Megatron logits and response_mask disagree on active response tokens: "
                                     f"{active_token_count} vs {response_token_count}."
                                 )
                             current_topk_indices = teacher_topk_indices.to(full_logits.device)
-                            active_teacher_topk_indices = current_topk_indices[response_mask]
+                            active_teacher_topk_indices = current_topk_indices[current_response_mask]
                             active_full_logits = full_logits[active_label_mask]
                             active_topk_logits = torch.gather(
                                 active_full_logits, dim=-1, index=active_teacher_topk_indices
@@ -808,7 +811,7 @@ class MegatronPPOActor(BasePPOActor):
                                 dtype=active_topk_logits.dtype,
                                 device=full_logits.device,
                             )
-                            response_aligned_topk[response_mask] = active_topk_logits - active_logsumexp
+                            response_aligned_topk[current_response_mask] = active_topk_logits - active_logsumexp
                             ret["topk_log_probs"] = response_aligned_topk
                             if return_topk_indices:
                                 ret["topk_indices"] = current_topk_indices
