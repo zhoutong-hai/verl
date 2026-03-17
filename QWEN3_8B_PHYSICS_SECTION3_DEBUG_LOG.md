@@ -416,3 +416,29 @@ sky launch -c verl-olmo3-physics \
     - `Packed Megatron logits and response_mask disagree on active response tokens: ...`
     - `KeyError: 'response_mask'`
 - So the latest rerun is materially healthier than the previous two, but it has not yet emitted the first `training/global_step` or validation checkpoint at the time of this update.
+
+### [Current Status] Megatron rerun has now reached real training steps
+
+- Live run:
+  - `/root/sky_logs/manual-megatron-20260317_202240/run.log`
+- The run has now emitted real training progress and is no longer failing during teacher-target construction or the first actor update.
+- First observed steps:
+  - step `1`
+    - `training/global_step = 1`
+    - `critic/score/mean = 0.6172`
+    - `response_length/mean = 582.56`
+    - `self_distillation/success_group_fraction = 0.8438`
+    - `self_distillation/reprompt_sample_fraction = 0.8359`
+    - `self_distillation/empty_target_batch = 0.1641`
+  - step `2`
+    - `training/global_step = 2`
+    - `critic/score/mean = 0.5938`
+    - `response_length/mean = 631.38`
+    - `self_distillation/success_group_fraction = 0.8125`
+    - `self_distillation/reprompt_sample_fraction = 0.7930`
+    - `self_distillation/empty_target_batch = 0.2070`
+- Important implication:
+  - both recent Megatron fixes are now validated enough to show that:
+    - the off-by-one alignment failure is gone
+    - the missing `response_mask` failure in the ref-worker teacher-scoring path is gone
+  - the next meaningful checkpoint is the first validation at step `5`
