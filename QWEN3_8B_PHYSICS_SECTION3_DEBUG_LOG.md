@@ -402,3 +402,17 @@ sky launch -c verl-olmo3-physics \
   - then build the shifted `label_mask` from that fallback
 - Expected effect:
   - the Megatron ref-worker can now compute teacher top-k distillation targets without requiring `response_mask` to be explicitly carried in that path
+
+### [In Progress] Latest Megatron rerun is live past the previous two crash points
+
+- Remote repo on `verl-olmo3-physics` is now at:
+  - `4a0e76f8`
+- Latest manual rerun:
+  - `/root/sky_logs/manual-megatron-20260317_202240/run.log`
+- Current status:
+  - `python3 -m verl.trainer.main_ppo` is still alive
+  - the run is past startup and deep into rollout / CUDA-graph warmup
+  - neither of the two most recent failure signatures has reappeared:
+    - `Packed Megatron logits and response_mask disagree on active response tokens: ...`
+    - `KeyError: 'response_mask'`
+- So the latest rerun is materially healthier than the previous two, but it has not yet emitted the first `training/global_step` or validation checkpoint at the time of this update.
