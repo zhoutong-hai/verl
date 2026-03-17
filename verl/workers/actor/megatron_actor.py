@@ -703,9 +703,12 @@ class MegatronPPOActor(BasePPOActor):
                 multi_modal_inputs = extract_multi_modal_inputs(batch["multi_modal_inputs"], indices)
             responses = batch["responses"]
             response_length = responses.size(1)
+            response_mask = batch.get("response_mask", None)
+            if response_mask is None:
+                response_mask = attention_mask[:, -response_length:]
+            response_mask = response_mask.to(device=attention_mask.device, dtype=torch.bool)
             label = position_ids.clone()
             label[:, -response_length - 1 : -1] = responses
-            response_mask = batch["response_mask"].to(device=attention_mask.device, dtype=torch.bool)
             # Score each real response token against the preceding sequence position. This is a one-token-left
             # shift of the response mask and avoids the r+1 off-by-one that appears when responses are shorter than
             # the padded response window.

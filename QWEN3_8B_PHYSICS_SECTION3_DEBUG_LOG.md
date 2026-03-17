@@ -376,3 +376,29 @@ sky launch -c verl-olmo3-physics \
 - Expected effect:
   - packed active logits and response-aligned teacher top-k support should now match exactly
   - the first Megatron actor update should get past the previous off-by-one assertion
+
+### [Resolved Locally] Ref-worker teacher scoring needed a `response_mask` fallback
+
+- After the off-by-one fix, the next rerun moved further and failed in the teacher ref-worker path instead of the first packed-logit alignment check.
+- Remote failure from:
+  - `/root/sky_logs/manual-megatron-20260317_201816/run.log`
+- New traceback:
+  - `KeyError: 'key "response_mask" not found in TensorDict with keys ['attention_mask', 'input_ids', 'position_ids', 'responses']'`
+  - crash site:
+    - `verl/workers/actor/megatron_actor.py`
+    - in `compute_log_prob -> forward_step`
+- Diagnosis:
+  - the Megatron SDPO `label_mask` logic now depends on `response_mask`
+  - the actor-update path already includes `response_mask` in the selected minibatch keys
+  - but the ref-worker teacher-scoring path calls `compute_log_prob()` with only:
+    - `input_ids`
+    - `attention_mask`
+    - `position_ids`
+    - `responses`
+  - so the ref worker needs to reconstruct `response_mask` when it is absent
+- Local fix applied:
+  - if `response_mask` is not present in the Megatron batch, derive it as:
+    - `attention_mask[:, -response_length:]`
+  - then build the shifted `label_mask` from that fallback
+- Expected effect:
+  - the Megatron ref-worker can now compute teacher top-k distillation targets without requiring `response_mask` to be explicitly carried in that path
