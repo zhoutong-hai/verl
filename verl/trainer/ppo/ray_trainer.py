@@ -692,14 +692,26 @@ class RayPPOTrainer:
         return solution_str
 
     def _compute_self_distillation_teacher_log_prob(self, teacher_batch: DataProto) -> DataProto:
+        raw_self_distillation_cfg = self.config.actor_rollout_ref.actor.get("self_distillation", None)
+        if raw_self_distillation_cfg is None:
+            raise ValueError("SDPO teacher scoring requires actor.self_distillation config.")
+        self_distillation_cfg = omega_conf_to_dataclass(
+            raw_self_distillation_cfg,
+            dataclass_type=SelfDistillationConfig,
+        )
         if teacher_batch.batch["self_distillation_mask"].sum().item() == 0:
             zeros = torch.zeros_like(teacher_batch.batch["response_mask"], dtype=torch.float32)
-            return DataProto.from_dict(
-                tensors={
-                    "teacher_log_probs": zeros,
-                    "self_distillation_mask": teacher_batch.batch["self_distillation_mask"],
-                }
-            )
+            tensors = {
+                "teacher_log_probs": zeros,
+                "self_distillation_mask": teacher_batch.batch["self_distillation_mask"],
+            }
+            if self_distillation_cfg.full_logit_distillation:
+                if self_distillation_cfg.distillation_topk is None:
+                    raise ValueError("full_logit_distillation requires self_distillation.distillation_topk")
+                topk_shape = (*zeros.shape, self_distillation_cfg.distillation_topk)
+                tensors["teacher_topk_log_probs"] = torch.zeros(topk_shape, dtype=torch.float32, device=zeros.device)
+                tensors["teacher_topk_indices"] = torch.zeros(topk_shape, dtype=torch.int64, device=zeros.device)
+            return DataProto.from_dict(tensors=tensors)
 
         ref_input = DataProto.from_dict(
             tensors={
@@ -709,12 +721,24 @@ class RayPPOTrainer:
                 "position_ids": teacher_batch.batch["teacher_position_ids"],
             }
         )
-        teacher_log_prob = self._compute_ref_log_prob(ref_input)
-        teacher_log_prob.batch["teacher_log_probs"] = teacher_log_prob.batch.pop("ref_log_prob")
+        if self_distillation_cfg.full_logit_distillation:
+            if self_distillation_cfg.teacher_scoring_mode != "trainer_ref":
+                raise ValueError("trainer-side teacher target computation requires teacher_scoring_mode='trainer_ref'.")
+            if self.config.actor_rollout_ref.actor.ppo_epochs != 1:
+                raise ValueError("Megatron trainer_ref full-logit SDPO currently requires actor.ppo_epochs == 1.")
+            teacher_log_prob = self._compute_ref_distillation_targets(ref_input)
+        else:
+            teacher_log_prob = self._compute_ref_log_prob(ref_input)
+            teacher_log_prob.batch["teacher_log_probs"] = teacher_log_prob.batch.pop("ref_log_prob")
         teacher_log_prob = teacher_log_prob.union(
             DataProto.from_dict(tensors={"self_distillation_mask": teacher_batch.batch["self_distillation_mask"]})
         )
         return teacher_log_prob
+
+    def _compute_ref_distillation_targets(self, batch: DataProto) -> DataProto:
+        if self.use_legacy_worker_impl == "disable":
+            raise NotImplementedError("Megatron ref distillation targets are not implemented for legacy worker disable.")
+        return self.ref_policy_wg.compute_ref_distillation_targets(batch)
 
     def _maybe_build_self_distillation_batch(
         self,

@@ -180,7 +180,14 @@ class MegatronPPOActor(BasePPOActor):
         self.config = config
 
     @GPUMemoryLogger(role="megatron actor", logger=logger)
-    def compute_log_prob(self, data: DataProto, calculate_entropy=False) -> torch.Tensor:
+    def compute_log_prob(
+        self,
+        data: DataProto,
+        calculate_entropy: bool = False,
+        distill_topk: int | None = None,
+        topk_indices: torch.Tensor | None = None,
+        return_topk_indices: bool = False,
+    ) -> torch.Tensor:
         """Compute the log probability of the responses given input_ids, attention_mask and position_ids
 
         Args:
@@ -212,11 +219,19 @@ class MegatronPPOActor(BasePPOActor):
                 "micro batch size is needed for forward compute when use_dynamic_bsz is False"
             )
 
+        use_topk = distill_topk is not None or topk_indices is not None
+        if use_topk and self.use_fused_kernels:
+            raise NotImplementedError("Megatron fused kernels path does not yet support SDPO top-k extraction.")
+
         def compute_logprobs_fn(output, data, use_dynamic_bsz=False, indices=None):
             response = data["responses"]
             response_length = response.size(1)
-            log_probs = output["log_probs"][:, -response_length - 1 : -1].contiguous()
-            return {"log_probs": log_probs}
+            result = {"log_probs": output["log_probs"][:, -response_length - 1 : -1].contiguous()}
+            if use_topk:
+                result["topk_log_probs"] = output["topk_log_probs"][:, -response_length - 1 : -1, :].contiguous()
+                if return_topk_indices:
+                    result["topk_indices"] = output["topk_indices"][:, -response_length - 1 : -1, :].contiguous()
+            return result
 
         # We make recompute_old_log_prob by default here.
         # TODO (zhangchi.usc1992): actually, this function should only return log_prob and this logic should be
@@ -225,7 +240,12 @@ class MegatronPPOActor(BasePPOActor):
 
         entropys = torch.Tensor()
         if recompute_old_log_prob:
+            if topk_indices is not None:
+                data = data.union(DataProto.from_dict(tensors={"teacher_topk_indices": topk_indices}))
+
             select_keys = ["responses", "input_ids", "attention_mask", "position_ids"]
+            if topk_indices is not None:
+                select_keys.append("teacher_topk_indices")
 
             if self.enable_routing_replay and self.config.router_replay.mode == "R3":
                 assert "routed_experts" in data.batch.keys(), "routed_experts must be in data.batch.keys()"
@@ -249,9 +269,11 @@ class MegatronPPOActor(BasePPOActor):
                 if mpu.is_pipeline_last_stage(ignore_virtual=True):
                     # only on last rank. It should be on every tp rank
                     if calculate_entropy:
-                        log_probs = [o[0]["log_probs"] for o in output["output"]]  # (bs, seq_size)
+                        metrics_list = [o[0] for o in output["output"]]
+                        log_probs = [o["log_probs"] for o in metrics_list]  # (bs, seq_size)
                     else:
-                        log_probs = [o["log_probs"] for o in output["output"]]  # (bs, seq_size)
+                        metrics_list = list(output["output"])
+                        log_probs = [o["log_probs"] for o in metrics_list]  # (bs, seq_size)
                     log_probs = torch.cat(log_probs, dim=0).to(torch.float32)
                     if use_dynamic_bsz:
                         indices = output["indices"]
@@ -259,10 +281,31 @@ class MegatronPPOActor(BasePPOActor):
                         assert len(indices) == log_probs.size(0), f"{len(indices)} vs. {log_probs.size()}"
                         revert_indices = torch.tensor(get_reverse_idx(indices), dtype=torch.long)
                         log_probs = log_probs[revert_indices]
+                    if use_topk:
+                        topk_log_probs = [o["topk_log_probs"] for o in metrics_list]
+                        topk_log_probs = torch.cat(topk_log_probs, dim=0).to(torch.float32)
+                        if use_dynamic_bsz:
+                            topk_log_probs = topk_log_probs[revert_indices]
+                        if return_topk_indices:
+                            gathered_topk_indices = [o["topk_indices"] for o in metrics_list]
+                            gathered_topk_indices = torch.cat(gathered_topk_indices, dim=0).to(torch.int64)
+                            if use_dynamic_bsz:
+                                gathered_topk_indices = gathered_topk_indices[revert_indices]
                 else:
                     log_probs = torch.empty(
                         size=(batch_size, response_length), dtype=torch.float32, device=input_ids.device
                     )
+                    if use_topk:
+                        topk_dim = topk_indices.size(-1) if topk_indices is not None else distill_topk
+                        topk_log_probs = torch.empty(
+                            size=(batch_size, response_length, topk_dim), dtype=torch.float32, device=input_ids.device
+                        )
+                        if return_topk_indices:
+                            gathered_topk_indices = torch.empty(
+                                size=(batch_size, response_length, topk_dim),
+                                dtype=torch.int64,
+                                device=input_ids.device,
+                            )
                 log_probs = log_probs.to(get_device_id())
                 # broadcast across pp ranks
                 torch.distributed.broadcast(
@@ -272,6 +315,24 @@ class MegatronPPOActor(BasePPOActor):
                     async_op=False,
                 )
                 log_probs = log_probs.to("cpu")
+                if use_topk:
+                    topk_log_probs = topk_log_probs.to(get_device_id())
+                    torch.distributed.broadcast(
+                        tensor=topk_log_probs,
+                        src=mpu.get_pipeline_model_parallel_last_rank(),
+                        group=mpu.get_pipeline_model_parallel_group(),
+                        async_op=False,
+                    )
+                    topk_log_probs = topk_log_probs.to("cpu")
+                    if return_topk_indices:
+                        gathered_topk_indices = gathered_topk_indices.to(get_device_id())
+                        torch.distributed.broadcast(
+                            tensor=gathered_topk_indices,
+                            src=mpu.get_pipeline_model_parallel_last_rank(),
+                            group=mpu.get_pipeline_model_parallel_group(),
+                            async_op=False,
+                        )
+                        gathered_topk_indices = gathered_topk_indices.to("cpu")
                 if calculate_entropy:
                     # Note that o[0] is metrics, o[1] is entropy
                     if mpu.is_pipeline_last_stage(ignore_virtual=True):
@@ -313,7 +374,9 @@ class MegatronPPOActor(BasePPOActor):
 
         for module, mode in zip(self.actor_module, prev_modes, strict=False):
             module.train(mode)
-        return log_probs, entropys, layers_topk_idx
+        return log_probs, entropys, layers_topk_idx, (topk_log_probs if use_topk else None), (
+            gathered_topk_indices if use_topk and return_topk_indices else None
+        )
 
     def make_minibatch_iterator(self, data: DataProto) -> Iterable[DataProto]:
         """Make minibatch iterator for updating the actor
@@ -352,6 +415,14 @@ class MegatronPPOActor(BasePPOActor):
         ]
         if self.config.policy_loss.get("loss_mode", "vanilla") == "sdpo":
             select_keys.extend(["teacher_log_probs", "self_distillation_mask"])
+            raw_self_distillation_cfg = getattr(self.config, "self_distillation", None)
+            if raw_self_distillation_cfg is not None:
+                self_distillation_cfg = omega_conf_to_dataclass(
+                    raw_self_distillation_cfg,
+                    dataclass_type=SelfDistillationConfig,
+                )
+                if self_distillation_cfg.full_logit_distillation:
+                    select_keys.extend(["teacher_topk_log_probs", "teacher_topk_indices"])
         if self.config.use_kl_loss:
             select_keys.append("ref_log_prob")
         # Include pre-computed IS weights if present in batch
@@ -502,17 +573,21 @@ class MegatronPPOActor(BasePPOActor):
                         raw_self_distillation_cfg,
                         dataclass_type=SelfDistillationConfig,
                     )
+                    student_topk_log_probs = None
                     if self_distillation_cfg.full_logit_distillation:
-                        raise NotImplementedError(
-                            "Megatron SDPO on v0.7.0 supports token-level distillation only. "
-                            "Set actor.self_distillation.full_logit_distillation=False."
-                        )
+                        if "teacher_topk_indices" not in data:
+                            raise ValueError("Megatron full-logit SDPO requires teacher_topk_indices in the batch.")
+                        if "topk_log_probs" not in output:
+                            raise ValueError("Megatron full-logit SDPO requires student top-k log-probs from forward.")
+                        student_topk_log_probs = output["topk_log_probs"][:, -response_length - 1 : -1, :].contiguous()
                     pg_loss, pg_metrics = compute_self_distillation_loss(
                         student_log_probs=log_prob,
                         teacher_log_probs=data["teacher_log_probs"],
                         response_mask=response_mask,
                         self_distillation_config=self_distillation_cfg,
                         old_log_probs=old_log_prob,
+                        student_topk_log_probs=student_topk_log_probs,
+                        teacher_topk_log_probs=data.get("teacher_topk_log_probs"),
                         self_distillation_mask=data.get("self_distillation_mask"),
                         loss_agg_mode=loss_agg_mode,
                         rollout_is_weights=rollout_is_weights,
@@ -637,6 +712,10 @@ class MegatronPPOActor(BasePPOActor):
             from verl.models.mcore import get_mcore_forward_fn, get_mcore_forward_fused_fn
 
             if self.use_fused_kernels:
+                if "teacher_topk_indices" in batch:
+                    raise NotImplementedError(
+                        "Megatron fused kernels path does not yet support full-logit SDPO top-k extraction."
+                    )
                 forward_fn = get_mcore_forward_fused_fn(self.hf_config)
                 if return_schedule_plan:
                     forward_fn = gptmodel_forward_1f1b_overlap
@@ -654,7 +733,11 @@ class MegatronPPOActor(BasePPOActor):
             else:
                 forward_fn = get_mcore_forward_fn(self.hf_config)
 
+                teacher_topk_indices = batch.get("teacher_topk_indices", None)
+
                 def logits_processor(logits, label, label_mask):
+                    from megatron.core import tensor_parallel
+
                     assert logits.shape[:2] == label.shape[:2]
                     assert label.shape == label_mask.shape
                     logits.div_(temperature)
@@ -674,6 +757,19 @@ class MegatronPPOActor(BasePPOActor):
                     log_probs = vocab_parallel_log_probs_from_logits(logits_bak, label)
                     log_probs = log_probs.masked_fill(~label_mask, 0.0)
                     ret["log_probs"] = log_probs
+                    if use_topk:
+                        # SDPO top-k support must be global over the vocabulary, not local to a TP shard.
+                        full_logits = tensor_parallel.gather_from_tensor_model_parallel_region(logits)
+                        if teacher_topk_indices is None:
+                            topk = min(distill_topk, full_logits.size(-1))
+                            topk_logits, current_topk_indices = torch.topk(full_logits, topk, dim=-1)
+                        else:
+                            current_topk_indices = teacher_topk_indices.to(full_logits.device)
+                            topk_logits = torch.gather(full_logits, dim=-1, index=current_topk_indices)
+                        logsumexp = torch.logsumexp(full_logits, dim=-1, keepdim=True)
+                        ret["topk_log_probs"] = topk_logits - logsumexp
+                        if return_topk_indices:
+                            ret["topk_indices"] = current_topk_indices
                     return ret
 
                 logits_processor_args = {"label": label, "label_mask": label_mask}

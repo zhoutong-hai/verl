@@ -74,7 +74,7 @@ from verl.utils.profiler.performance import reduce_timing, topk_reduce_ratio_min
 from verl.utils.ray_utils import get_event_loop
 from verl.utils.torch_functional import use_original_torch_compile
 from verl.workers.actor.megatron_actor import MegatronPPOActor
-from verl.workers.config import HFModelConfig, McoreCriticConfig, RolloutConfig
+from verl.workers.config import HFModelConfig, McoreCriticConfig, RolloutConfig, SelfDistillationConfig
 from verl.workers.critic.megatron_critic import MegatronPPOCritic
 from verl.workers.reward_model.megatron.reward_model import MegatronRewardModel
 from verl.workers.rollout import get_rollout_class
@@ -904,6 +904,52 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
         return output
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
+    @GPUMemoryLogger(role="compute_ref_distillation_targets", logger=logger)
+    @DistProfiler.annotate(color="olive", role="ref_compute_distillation_targets")
+    def compute_ref_distillation_targets(self, data: DataProto):
+        assert self._is_ref
+        raw_self_distillation_cfg = getattr(self.config.actor, "self_distillation", None)
+        if raw_self_distillation_cfg is None:
+            raise ValueError("compute_ref_distillation_targets requires actor.self_distillation config.")
+        self_distillation_cfg = omega_conf_to_dataclass(
+            raw_self_distillation_cfg,
+            dataclass_type=SelfDistillationConfig,
+        )
+        distill_topk = self_distillation_cfg.distillation_topk
+        if not self_distillation_cfg.full_logit_distillation or distill_topk is None:
+            raise ValueError("compute_ref_distillation_targets requires full_logit_distillation with distillation_topk.")
+
+        if self._ref_is_offload_param:
+            load_megatron_model_to_gpu(self.ref_module, load_grad=False)
+            log_gpu_memory_usage("After load ref params and grad during compute_ref_distillation_targets", logger=logger)
+        micro_batch_size = self.config.ref.log_prob_micro_batch_size_per_gpu
+        data.meta_info["micro_batch_size"] = micro_batch_size
+        data.meta_info["max_token_len"] = self.config.ref.log_prob_max_token_len_per_gpu
+        data.meta_info["use_dynamic_bsz"] = self.config.ref.log_prob_use_dynamic_bsz
+        data.meta_info["temperature"] = self.config.rollout.temperature
+        teacher_log_probs, _, _, teacher_topk_log_probs, teacher_topk_indices = self.ref_policy.compute_log_prob(
+            data=data,
+            calculate_entropy=False,
+            distill_topk=distill_topk,
+            return_topk_indices=True,
+        )
+        output = DataProto.from_dict(
+            tensors={
+                "teacher_log_probs": teacher_log_probs,
+                "teacher_topk_log_probs": teacher_topk_log_probs,
+                "teacher_topk_indices": teacher_topk_indices,
+            }
+        )
+        output = output.to("cpu")
+        if self._ref_is_offload_param:
+            offload_megatron_model_to_cpu(self.ref_module)
+            log_gpu_memory_usage(
+                "After offload ref params and grad during compute_ref_distillation_targets", logger=logger
+            )
+        aggressive_empty_cache(force_sync=True)
+        return output
+
+    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
     @GPUMemoryLogger(role="compute_log_prob", logger=logger)
     @DistProfiler.annotate(color="blue", role="actor_compute_log_prob")
     def compute_log_prob(self, data: DataProto):
@@ -923,7 +969,7 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
         if self.enable_routing_replay and self.config.actor.router_replay.mode == "R3":
             RouterReplay.set_global_router_replay_action(RouterReplayAction.REPLAY_FORWARD)
 
-        output, entropys, layers_topk_idx = self.actor.compute_log_prob(data=data, calculate_entropy=True)
+        output, entropys, layers_topk_idx, _, _ = self.actor.compute_log_prob(data=data, calculate_entropy=True)
         output = DataProto.from_dict(
             tensors={"old_log_probs": output, "entropys": entropys},
             meta_info={"temperature": self.config.rollout.temperature},

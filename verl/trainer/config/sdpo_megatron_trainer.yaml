@@ -7,9 +7,9 @@ actor_rollout_ref:
     policy_loss:
       loss_mode: sdpo
     self_distillation:
-      # The Megatron port on v0.7.0 currently uses token-level distillation only.
-      full_logit_distillation: false
-      alpha: 1.0
+      full_logit_distillation: true
+      distillation_topk: 100
+      alpha: 0.5
       success_reward_threshold: 1.0
       teacher_regularization: ema
       teacher_update_rate: 0.01
