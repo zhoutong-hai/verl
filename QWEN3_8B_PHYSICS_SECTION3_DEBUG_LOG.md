@@ -465,3 +465,67 @@ sky launch -c verl-olmo3-physics \
   - do the same for `topk_indices` when requested
 - Expected effect:
   - the MCore postprocess path and later Megatron loss slicing should now see consistent tensor layouts
+
+### [Current Status] Latest Megatron rerun is alive but behaviorally collapsing by step 10
+
+- Live run:
+  - `/root/sky_logs/manual-megatron-20260317_204900/run.log`
+- Current process is still alive and training:
+  - `python3 -m verl.trainer.main_ppo`
+- Early steps looked healthier than the previous run:
+  - step `1`
+    - `actor/grad_norm = 0.01005`
+    - `self_distillation/success_group_fraction = 0.875`
+    - `self_distillation/reprompt_sample_fraction = 0.8633`
+    - `self_distillation/empty_target_batch = 0.1367`
+    - `critic/score/mean = 0.6094`
+    - `response_length/mean = 578.15`
+- But by step `10`, the run had drifted badly:
+  - `val-core/sciknoweval/acc/mean@16 = 0.0015625`
+  - `val-core/sciknoweval/acc/best@16/mean = 0.0111375`
+  - `val-core/sciknoweval/acc/maj@16/mean = 0.0017875`
+  - `self_distillation/success_group_fraction = 0.21875`
+  - `self_distillation/reprompt_sample_fraction = 0.203125`
+  - `self_distillation/empty_target_batch = 0.796875`
+  - `critic/score/mean = 0.09375`
+  - `response_length/mean = 6813.53`
+  - `response_length/clip_ratio = 0.8125`
+  - `actor/grad_norm = 0.01162`
+- So the latest Megatron run is not technically crashed, but it is clearly in a bad behavioral regime:
+  - gradients are non-zero
+  - SDPO supervision is mostly gone
+  - outputs are running to the max-length cap
+  - validation has effectively collapsed
+
+### [Observed Failure Mode] Step-5 samples are normal, step-10 samples turn into repeated markdown image spam
+
+- Validation dump paths:
+  - step `5`:
+    - `/hai/zhoutong/section3_physics_assets/validation_generations/qwen3_8b_section3_physics_sdpo_megatron/5.jsonl`
+  - step `10`:
+    - `/hai/zhoutong/section3_physics_assets/validation_generations/qwen3_8b_section3_physics_sdpo_megatron/10.jsonl`
+- Step `5` sample quality:
+  - `32/32` outputs include `<answer>...</answer>`
+  - mean output length is about `918` characters
+  - first samples are coherent physics solutions with correct predictions like `B`
+- Step `10` sample quality:
+  - `32/32` outputs contain repeated `![](https://i.imgur.com/...)` markdown image strings
+  - `32/32` contain markdown image syntax
+  - mean output length is about `18.3k` characters
+  - `0/32` include `<answer>...</answer>`
+  - example prediction becomes a long repeated Imgur markdown blob instead of `A/B/C/D`
+- Input sanity check:
+  - the underlying validation prompt is still a normal physics multiple-choice question
+  - so this is not caused by corrupted evaluation data
+
+### [Working Hypotheses] Most likely remaining Megatron issues
+
+- The latest Megatron path is now technically stable enough to run, so the remaining issue is likely semantic rather than a simple crash bug.
+- Highest-probability possibilities:
+  - there is still a semantic mismatch between Megatron full-logit SDPO and the healthy FSDP path, even though the main tensor-shape crashes are fixed
+  - the Megatron objective is still allowing a runaway long-output mode that FSDP does not enter on the same Qwen Physics setup
+  - the trainer-ref teacher-target design may still be less stable than the FSDP actor-worker teacher path, even with `ppo_epochs = 1`
+- Strong evidence for that:
+  - Qwen Physics FSDP stayed healthy on the same task
+  - the latest Megatron run does not die from zero gradients or immediate tensor bugs
+  - instead it drifts into max-length repeated junk output while SDPO supervision supply collapses
