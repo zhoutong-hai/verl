@@ -554,3 +554,16 @@ sky launch -c verl-olmo3-physics \
   - `response_length/mean ~= 5.2k`
   - validation samples still show repeated markdown image spam
 - Next action: relaunch the same Qwen Physics Megatron run with these new diagnostics enabled, then inspect whether the support-mismatch metrics collapse before or alongside output quality.
+
+### [Resolved Locally] Diagnostic rerun hit metric-reduction failure before step 1
+
+- The first diagnostic rerun (`manual-megatron-20260317_222033`) did not reach the first training step.
+- Failure:
+  - `ValueError: setting an array element with a sequence` in [reduce_metrics](/Users/zhoutong/code/verl/verl/utils/metric/utils.py)
+- Interpretation:
+  - one of the newly added debug metrics was being surfaced in a non-scalar form during actor metric aggregation
+  - this was a logging/reduction robustness issue, not a new training-semantic failure
+- Fix:
+  - made [reduce_metrics](/Users/zhoutong/code/verl/verl/utils/metric/utils.py) coerce metric payloads into scalars before applying `mean` / `max` / `min`
+  - this keeps the training loop robust even when debug instrumentation occasionally emits tensors, arrays, or short numeric sequences
+- `python3 -m compileall` passed after the reducer patch.

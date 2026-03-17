@@ -20,6 +20,37 @@ from typing import Any
 import numpy as np
 
 
+def _coerce_metric_value(value: Any) -> Any:
+    """Convert metric payloads into scalar values for reducer aggregation.
+
+    Most metrics are already Python scalars. For debugging instrumentation we may
+    occasionally surface 0-d tensors/arrays or short numeric sequences; reduce
+    them to a scalar mean so training logs remain robust.
+    """
+
+    if isinstance(value, (list, tuple)):
+        if len(value) == 0:
+            return 0.0
+        return float(np.mean([_coerce_metric_value(v) for v in value]))
+
+    if isinstance(value, np.ndarray):
+        if value.size == 0:
+            return 0.0
+        if value.size == 1:
+            return value.item()
+        return float(value.mean())
+
+    # Handle torch tensors without importing torch at module import time.
+    if hasattr(value, "detach") and hasattr(value, "numel"):
+        if value.numel() == 0:
+            return 0.0
+        if value.numel() == 1:
+            return value.detach().item()
+        return float(value.detach().to(dtype=value.detach().float().dtype).mean().item())
+
+    return value
+
+
 def reduce_metrics(metrics: dict[str, list[Any]]) -> dict[str, Any]:
     """
     Reduces a dictionary of metric lists by computing the mean, max, or min of each list.
@@ -45,10 +76,11 @@ def reduce_metrics(metrics: dict[str, list[Any]]) -> dict[str, Any]:
         {"loss": 2.0, "accuracy": 0.8, "max_reward": 8.0, "min_error": 0.05}
     """
     for key, val in metrics.items():
+        reduced_inputs = [_coerce_metric_value(v) for v in val]
         if "max" in key:
-            metrics[key] = np.max(val)
+            metrics[key] = np.max(reduced_inputs)
         elif "min" in key:
-            metrics[key] = np.min(val)
+            metrics[key] = np.min(reduced_inputs)
         else:
-            metrics[key] = np.mean(val)
+            metrics[key] = np.mean(reduced_inputs)
     return metrics
