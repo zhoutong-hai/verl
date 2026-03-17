@@ -529,3 +529,28 @@ sky launch -c verl-olmo3-physics \
   - Qwen Physics FSDP stayed healthy on the same task
   - the latest Megatron run does not die from zero gradients or immediate tensor bugs
   - instead it drifts into max-length repeated junk output while SDPO supervision supply collapses
+
+### [In Progress] Added Megatron teacher-support diagnostics to test the loss-semantics hypothesis
+
+- Added new Megatron-only SDPO debug metrics in [megatron_actor.py](/Users/zhoutong/code/verl/verl/workers/actor/megatron_actor.py):
+  - `self_distillation/student_mass_on_teacher_support_mean`
+  - `self_distillation/student_top1_in_teacher_support_fraction`
+  - `self_distillation/student_top1_matches_teacher_top1_fraction`
+- Why these matter:
+  - the healthy FSDP path evaluates the teacher on the student's top-k support
+  - the current Megatron `trainer_ref` path evaluates the student on the teacher's top-k support
+  - if the student begins drifting toward bad tokens outside the teacher's support, the current Megatron path may only see that drift through the compressed tail bucket
+- These new metrics are meant to show whether that is happening in practice:
+  - low `student_mass_on_teacher_support_mean` would mean the teacher support is missing a lot of the student's actual probability mass
+  - low `student_top1_in_teacher_support_fraction` would mean the student's top token is often outside the teacher's top-k set
+  - low `student_top1_matches_teacher_top1_fraction` would mean the two policies are already choosing very different next-token modes
+- `python3 -m compileall` passed after this instrumentation patch.
+- The currently running Megatron job remained collapsed through steps `20` and `21`:
+  - `success_group_fraction = 0.0`
+  - `reprompt_sample_fraction = 0.0`
+  - `empty_target_batch = 1.0`
+  - `actor/pg_loss = 0.0`
+  - `actor/grad_norm = 0.0`
+  - `response_length/mean ~= 5.2k`
+  - validation samples still show repeated markdown image spam
+- Next action: relaunch the same Qwen Physics Megatron run with these new diagnostics enabled, then inspect whether the support-mismatch metrics collapse before or alongside output quality.

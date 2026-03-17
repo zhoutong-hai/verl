@@ -601,6 +601,45 @@ class MegatronPPOActor(BasePPOActor):
                         loss_agg_mode=loss_agg_mode,
                         rollout_is_weights=rollout_is_weights,
                     )
+                    active_sdpo_mask = response_mask.bool()
+                    if "self_distillation_mask" in data:
+                        active_sdpo_mask = active_sdpo_mask & data["self_distillation_mask"].unsqueeze(1).bool()
+                    student_mass_on_teacher_support = output.get("student_mass_on_teacher_support")
+                    if student_mass_on_teacher_support is not None:
+                        if student_mass_on_teacher_support.shape[1] == response_length:
+                            response_student_mass = student_mass_on_teacher_support.contiguous()
+                        else:
+                            response_student_mass = student_mass_on_teacher_support[
+                                :, -response_length - 1 : -1
+                            ].contiguous()
+                        if active_sdpo_mask.any():
+                            pg_metrics["self_distillation/student_mass_on_teacher_support_mean"] = (
+                                response_student_mass[active_sdpo_mask].mean().detach().item()
+                            )
+                    student_top1_in_teacher_support = output.get("student_top1_in_teacher_support")
+                    if student_top1_in_teacher_support is not None:
+                        if student_top1_in_teacher_support.shape[1] == response_length:
+                            response_top1_in_teacher = student_top1_in_teacher_support.contiguous()
+                        else:
+                            response_top1_in_teacher = student_top1_in_teacher_support[
+                                :, -response_length - 1 : -1
+                            ].contiguous()
+                        if active_sdpo_mask.any():
+                            pg_metrics["self_distillation/student_top1_in_teacher_support_fraction"] = (
+                                response_top1_in_teacher[active_sdpo_mask].mean().detach().item()
+                            )
+                    student_top1_matches_teacher_top1 = output.get("student_top1_matches_teacher_top1")
+                    if student_top1_matches_teacher_top1 is not None:
+                        if student_top1_matches_teacher_top1.shape[1] == response_length:
+                            response_top1_match = student_top1_matches_teacher_top1.contiguous()
+                        else:
+                            response_top1_match = student_top1_matches_teacher_top1[
+                                :, -response_length - 1 : -1
+                            ].contiguous()
+                        if active_sdpo_mask.any():
+                            pg_metrics["self_distillation/student_top1_matches_teacher_top1_fraction"] = (
+                                response_top1_match[active_sdpo_mask].mean().detach().item()
+                            )
                     pg_metrics["self_distillation/empty_target_batch"] = (
                         data["self_distillation_mask"].sum().item() == 0
                     )
@@ -788,6 +827,16 @@ class MegatronPPOActor(BasePPOActor):
                             topk_logits = torch.gather(full_logits, dim=-1, index=current_topk_indices)
                             logsumexp = torch.logsumexp(full_logits, dim=-1, keepdim=True)
                             ret["topk_log_probs"] = topk_logits - logsumexp
+                            student_top1 = full_logits.argmax(dim=-1)
+                            ret["student_mass_on_teacher_support"] = torch.exp(
+                                torch.logsumexp(topk_logits, dim=-1) - logsumexp.squeeze(-1)
+                            )
+                            ret["student_top1_in_teacher_support"] = (
+                                (current_topk_indices == student_top1.unsqueeze(-1)).any(dim=-1).to(topk_logits.dtype)
+                            )
+                            ret["student_top1_matches_teacher_top1"] = (
+                                (student_top1 == current_topk_indices[..., 0]).to(topk_logits.dtype)
+                            )
                             if return_topk_indices:
                                 ret["topk_indices"] = current_topk_indices
                         else:
@@ -809,6 +858,10 @@ class MegatronPPOActor(BasePPOActor):
                                 active_full_logits, dim=-1, index=active_teacher_topk_indices
                             )
                             active_logsumexp = torch.logsumexp(active_full_logits, dim=-1, keepdim=True)
+                            active_student_top1 = active_full_logits.argmax(dim=-1)
+                            active_student_mass_on_teacher_support = torch.exp(
+                                torch.logsumexp(active_topk_logits, dim=-1) - active_logsumexp.squeeze(-1)
+                            )
                             packed_topk_log_probs = torch.zeros(
                                 (*active_label_mask.shape, current_topk_indices.size(-1)),
                                 dtype=active_topk_logits.dtype,
@@ -816,6 +869,35 @@ class MegatronPPOActor(BasePPOActor):
                             )
                             packed_topk_log_probs[active_label_mask] = active_topk_logits - active_logsumexp
                             ret["topk_log_probs"] = packed_topk_log_probs
+                            packed_student_mass_on_teacher_support = torch.zeros(
+                                active_label_mask.shape,
+                                dtype=active_topk_logits.dtype,
+                                device=full_logits.device,
+                            )
+                            packed_student_mass_on_teacher_support[active_label_mask] = (
+                                active_student_mass_on_teacher_support
+                            )
+                            ret["student_mass_on_teacher_support"] = packed_student_mass_on_teacher_support
+                            packed_student_top1_in_teacher_support = torch.zeros(
+                                active_label_mask.shape,
+                                dtype=active_topk_logits.dtype,
+                                device=full_logits.device,
+                            )
+                            packed_student_top1_in_teacher_support[active_label_mask] = (
+                                (active_teacher_topk_indices == active_student_top1.unsqueeze(-1))
+                                .any(dim=-1)
+                                .to(active_topk_logits.dtype)
+                            )
+                            ret["student_top1_in_teacher_support"] = packed_student_top1_in_teacher_support
+                            packed_student_top1_matches_teacher_top1 = torch.zeros(
+                                active_label_mask.shape,
+                                dtype=active_topk_logits.dtype,
+                                device=full_logits.device,
+                            )
+                            packed_student_top1_matches_teacher_top1[active_label_mask] = (
+                                (active_student_top1 == active_teacher_topk_indices[:, 0]).to(active_topk_logits.dtype)
+                            )
+                            ret["student_top1_matches_teacher_top1"] = packed_student_top1_matches_teacher_top1
                             if return_topk_indices:
                                 packed_topk_indices = torch.zeros(
                                     (*active_label_mask.shape, current_topk_indices.size(-1)),
