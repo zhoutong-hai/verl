@@ -316,3 +316,17 @@ sky launch -c verl-olmo3-physics \
   - push this alignment fix
   - rerun the same manual Qwen Physics Megatron job on `verl-olmo3-physics`
   - verify it gets past the first actor update and emits `training/global_step`
+
+### [In Progress] Post-fix Megatron rerun launched on commit `47520ec7`
+
+- The response-alignment fix was committed as:
+  - `47520ec7` `Fix Megatron response-aligned top-k gathering`
+- The remote repo on `verl-olmo3-physics` was updated to the same commit.
+- A fresh manual rerun was launched under:
+  - `/root/sky_logs/manual-megatron-20260317_185859/run.log`
+- Current status at the latest check:
+  - the rerun is alive
+  - no `Traceback`, `RuntimeError`, or `Unhandled error` has been written to `run.log`
+  - the previous `torch.gather(... teacher_topk_indices ...)` size-mismatch crash has not reappeared
+  - but the job has not yet emitted `training/global_step` or validation metrics either
+- So the immediate shape-mismatch failure appears resolved, but runtime verification is still incomplete until the rerun reaches the first actor update and logs a step.
