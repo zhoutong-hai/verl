@@ -76,6 +76,17 @@ sky launch -c verl-olmo3-physics \
   - keep the same public Qwen3 8B model, Physics data, inline samples, and capped validation dumps
   - rerun Megatron SDPO on the new full-logit top-k implementation
   - compare that refreshed Megatron result against this healthy FSDP SDPO baseline
+- Current relaunch status:
+  - the full-logit Megatron Physics rerun is now active on the existing `verl-olmo3-physics` node via a manual remote launch
+  - remote repo path: `/root/verl-section3-physics`
+  - remote repo commit: `9bec3e12`
+  - manual remote log: `/root/sky_logs/manual-megatron-20260317_184636/run.log`
+  - manual launcher PID: `1475282`
+  - confirmed from the live `run.log` config dump:
+    - `teacher_scoring_mode = trainer_ref`
+    - `full_logit_distillation = true`
+    - `distillation_topk = 100`
+    - `alpha = 0.5`
 - Megatron comparison status:
   - first attempt: job `7`
   - result: failed immediately because the cluster cloned an older branch state that did not yet include the local `sdpo_megatron` Physics launcher changes

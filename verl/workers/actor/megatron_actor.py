@@ -222,6 +222,8 @@ class MegatronPPOActor(BasePPOActor):
         use_topk = distill_topk is not None or topk_indices is not None
         if use_topk and self.use_fused_kernels:
             raise NotImplementedError("Megatron fused kernels path does not yet support SDPO top-k extraction.")
+        data.meta_info["distill_topk"] = distill_topk
+        data.meta_info["return_topk_indices"] = return_topk_indices
 
         def compute_logprobs_fn(output, data, use_dynamic_bsz=False, indices=None):
             response = data["responses"]
@@ -491,6 +493,8 @@ class MegatronPPOActor(BasePPOActor):
 
         indices = None
         temperature = data.meta_info["temperature"]
+        distill_topk = data.meta_info.get("distill_topk", None)
+        return_topk_indices = data.meta_info.get("return_topk_indices", False)
         if use_dynamic_bsz:
             assert max_token_len is not None, "max_token_len must be set when use_dynamic_bsz is True"
             vpp_size = mpu.get_virtual_pipeline_model_parallel_world_size()
@@ -734,6 +738,7 @@ class MegatronPPOActor(BasePPOActor):
                 forward_fn = get_mcore_forward_fn(self.hf_config)
 
                 teacher_topk_indices = batch.get("teacher_topk_indices", None)
+                should_compute_topk = teacher_topk_indices is not None or distill_topk is not None
 
                 def logits_processor(logits, label, label_mask):
                     from megatron.core import tensor_parallel
@@ -757,7 +762,7 @@ class MegatronPPOActor(BasePPOActor):
                     log_probs = vocab_parallel_log_probs_from_logits(logits_bak, label)
                     log_probs = log_probs.masked_fill(~label_mask, 0.0)
                     ret["log_probs"] = log_probs
-                    if use_topk:
+                    if should_compute_topk:
                         # SDPO top-k support must be global over the vocabulary, not local to a TP shard.
                         full_logits = tensor_parallel.gather_from_tensor_model_parallel_region(logits)
                         if teacher_topk_indices is None:
