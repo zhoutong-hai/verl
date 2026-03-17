@@ -32,8 +32,16 @@ PHYSICS_TRAIN_FILE="${PHYSICS_TRAIN_FILE:-$PHYSICS_DATA_DIR/train.parquet}"
 PHYSICS_VAL_FILE="${PHYSICS_VAL_FILE:-$PHYSICS_DATA_DIR/test.parquet}"
 N_GPUS_PER_NODE="${N_GPUS_PER_NODE:-8}"
 NNODES="${NNODES:-1}"
+TRAIN_TP_SIZE="${TRAIN_TP_SIZE:-2}"
+TRAIN_PP_SIZE="${TRAIN_PP_SIZE:-1}"
+ROLLOUT_TP_SIZE="${ROLLOUT_TP_SIZE:-2}"
+ROLLOUT_PP_SIZE="${ROLLOUT_PP_SIZE:-1}"
 
 export VLLM_USE_V1="${VLLM_USE_V1:-1}"
+
+if [[ "$VARIANT" == "sdpo_megatron" ]]; then
+  export CUDA_DEVICE_MAX_CONNECTIONS="${CUDA_DEVICE_MAX_CONNECTIONS:-1}"
+fi
 
 if [[ ! -f "$PHYSICS_TRAIN_FILE" || ! -f "$PHYSICS_VAL_FILE" ]]; then
   echo "Preprocessed parquet not found. Generating from $PHYSICS_DATA_DIR ..."
@@ -50,9 +58,13 @@ case "$VARIANT" in
     CONFIG_NAME="sdpo_fsdp_sciknoweval_physics_olmo_trainer.yaml"
     DEFAULT_EXP_NAME="olmo3_7b_section3_physics_sdpo_fsdp"
     ;;
+  sdpo_megatron)
+    CONFIG_NAME="sdpo_megatron_sciknoweval_physics_qwen_trainer.yaml"
+    DEFAULT_EXP_NAME="qwen3_8b_section3_physics_sdpo_megatron"
+    ;;
   *)
     echo "Unknown VARIANT=$VARIANT"
-    echo "Expected one of: grpo_fsdp, sdpo_fsdp"
+    echo "Expected one of: grpo_fsdp, sdpo_fsdp, sdpo_megatron"
     exit 1
     ;;
 esac
@@ -74,6 +86,10 @@ export PHYSICS_TRAIN_FILE
 export PHYSICS_VAL_FILE
 export N_GPUS_PER_NODE
 export NNODES
+export TRAIN_TP_SIZE
+export TRAIN_PP_SIZE
+export ROLLOUT_TP_SIZE
+export ROLLOUT_PP_SIZE
 export VALIDATION_DATA_DIR
 
 python3 -m verl.trainer.main_ppo \

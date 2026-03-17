@@ -10,8 +10,13 @@ envs:
   WANDB_PROJECT: main_models_zhoutong
   WANDB_ENTITY: hippocraticai
   WANDB_EXP_NAME: <placeholder>
+  TRAIN_TP_SIZE: "2"
+  TRAIN_PP_SIZE: "1"
+  ROLLOUT_TP_SIZE: "2"
+  ROLLOUT_PP_SIZE: "1"
   N_GPUS_PER_NODE: "8"
   NNODES: "1"
+  CUDA_DEVICE_MAX_CONNECTIONS: "1"
   VLLM_USE_V1: "1"
   VLLM_ALLREDUCE_USE_SYMM_MEM: "0"
   VLLM_USE_NCCL_SYMM_MEM: "0"
@@ -59,6 +64,15 @@ setup: |
   pip3 install --upgrade \
     "transformers==4.57.1" \
     "huggingface_hub==0.36.2"
+
+  if [ "$VARIANT" = "sdpo_megatron" ]; then
+    pip3 install --upgrade "nvidia-modelopt[torch]==0.40.0"
+    pip3 install --upgrade "megatron-core==0.15.0"
+    pip3 install --no-deps "git+https://github.com/NVIDIA-NeMo/Megatron-Bridge.git@v0.2.2"
+
+    python3 -c "import subprocess,re;from pathlib import Path;loc=subprocess.run(['pip3','show','megatron-bridge'],capture_output=True,text=True).stdout;m=re.search(r'Location: (.+)',loc);site=Path(m.group(1).strip()) if m else None;gpt=site/'megatron/bridge/models/gpt_provider.py' if site else None;c=gpt.read_text() if gpt and gpt.exists() else '';old='import modelopt.torch.distill as mtd\\nimport modelopt.torch.distill.plugins.megatron as mtd_mcore';new='try:\\n    import modelopt.torch.distill as mtd\\n    import modelopt.torch.distill.plugins.megatron as mtd_mcore\\nexcept ImportError:\\n    mtd = None\\n    mtd_mcore = None';c=c.replace(old,new) if old in c else c;gpt.write_text(c) if c and 'mtd_mcore = None' not in gpt.read_text() else None;print(f'Patched {gpt}') if c else print('No patch needed')"
+  fi
+
   python3 -c "import verl; import pathlib; print(pathlib.Path(verl.__file__).resolve())"
 
   mkdir -p "$MODEL_PATH"
@@ -74,6 +88,7 @@ setup: |
 run: |
   set -euo pipefail
   cd "$VERL_REPO_DIR"
+  export CUDA_DEVICE_MAX_CONNECTIONS="${CUDA_DEVICE_MAX_CONNECTIONS:-1}"
   export VLLM_ALLREDUCE_USE_SYMM_MEM=0
   export VLLM_USE_NCCL_SYMM_MEM=0
   export TORCH_SYMM_MEM_ALLOW_OVERLAPPING_DEVICES=0
@@ -122,6 +137,10 @@ run: |
     export PHYSICS_DATA_DIR
     export N_GPUS_PER_NODE="${SKYPILOT_NUM_GPUS_PER_NODE:-$N_GPUS_PER_NODE}"
     export NNODES="$NUM_NODES"
+    export TRAIN_TP_SIZE
+    export TRAIN_PP_SIZE
+    export ROLLOUT_TP_SIZE
+    export ROLLOUT_PP_SIZE
 
     bash "$VERL_REPO_DIR/examples/sdpo_trainer/run_olmo3_7b_sciknoweval_physics_section3.sh"
   else
