@@ -583,7 +583,12 @@ class MegatronPPOActor(BasePPOActor):
                             raise ValueError("Megatron full-logit SDPO requires teacher_topk_indices in the batch.")
                         if "topk_log_probs" not in output:
                             raise ValueError("Megatron full-logit SDPO requires student top-k log-probs from forward.")
-                        student_topk_log_probs = output["topk_log_probs"][:, -response_length - 1 : -1, :].contiguous()
+                        if output["topk_log_probs"].shape[1] == response_length:
+                            student_topk_log_probs = output["topk_log_probs"].contiguous()
+                        else:
+                            student_topk_log_probs = output["topk_log_probs"][
+                                :, -response_length - 1 : -1, :
+                            ].contiguous()
                     pg_loss, pg_metrics = compute_self_distillation_loss(
                         student_log_probs=log_prob,
                         teacher_log_probs=data["teacher_log_probs"],
@@ -768,13 +773,45 @@ class MegatronPPOActor(BasePPOActor):
                         if teacher_topk_indices is None:
                             topk = min(distill_topk, full_logits.size(-1))
                             topk_logits, current_topk_indices = torch.topk(full_logits, topk, dim=-1)
-                        else:
+                            logsumexp = torch.logsumexp(full_logits, dim=-1, keepdim=True)
+                            ret["topk_log_probs"] = topk_logits - logsumexp
+                            if return_topk_indices:
+                                ret["topk_indices"] = current_topk_indices
+                        elif teacher_topk_indices.shape[1] == full_logits.shape[1]:
                             current_topk_indices = teacher_topk_indices.to(full_logits.device)
                             topk_logits = torch.gather(full_logits, dim=-1, index=current_topk_indices)
-                        logsumexp = torch.logsumexp(full_logits, dim=-1, keepdim=True)
-                        ret["topk_log_probs"] = topk_logits - logsumexp
-                        if return_topk_indices:
-                            ret["topk_indices"] = current_topk_indices
+                            logsumexp = torch.logsumexp(full_logits, dim=-1, keepdim=True)
+                            ret["topk_log_probs"] = topk_logits - logsumexp
+                            if return_topk_indices:
+                                ret["topk_indices"] = current_topk_indices
+                        else:
+                            # trainer_ref teacher targets are response-aligned [bs, response_len, k], while the
+                            # packed Megatron logits here are sequence-aligned [bs, active_seq_len, vocab].
+                            response_mask = batch["response_mask"].to(device=full_logits.device, dtype=torch.bool)
+                            active_label_mask = label_mask.to(dtype=torch.bool)
+                            active_token_count = int(active_label_mask.sum().item())
+                            response_token_count = int(response_mask.sum().item())
+                            if active_token_count != response_token_count:
+                                raise ValueError(
+                                    "Packed Megatron logits and response_mask disagree on active response tokens: "
+                                    f"{active_token_count} vs {response_token_count}."
+                                )
+                            current_topk_indices = teacher_topk_indices.to(full_logits.device)
+                            active_teacher_topk_indices = current_topk_indices[response_mask]
+                            active_full_logits = full_logits[active_label_mask]
+                            active_topk_logits = torch.gather(
+                                active_full_logits, dim=-1, index=active_teacher_topk_indices
+                            )
+                            active_logsumexp = torch.logsumexp(active_full_logits, dim=-1, keepdim=True)
+                            response_aligned_topk = torch.zeros(
+                                current_topk_indices.shape,
+                                dtype=active_topk_logits.dtype,
+                                device=full_logits.device,
+                            )
+                            response_aligned_topk[response_mask] = active_topk_logits - active_logsumexp
+                            ret["topk_log_probs"] = response_aligned_topk
+                            if return_topk_indices:
+                                ret["topk_indices"] = current_topk_indices
                     return ret
 
                 logits_processor_args = {"label": label, "label_mask": label_mask}

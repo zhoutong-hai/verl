@@ -293,3 +293,26 @@ sky launch -c verl-olmo3-physics \
   - the present Megatron implementation is not just "weaker than FSDP"; it is optimizing a materially different and less stable objective
   - once the EMA teacher falls behind, the token-level reverse-KL approximation appears to push the model toward ultra-short / empty outputs instead of stable distillation
   - this is consistent with the design gap already noted in `MEGATRON_SDPO_REVIEW.md`
+
+### [Resolved Locally] Megatron full-logit rerun exposed a response-alignment bug in trainer_ref top-k support
+
+- After the Phase 1 full-logit implementation was pushed and manually relaunched on `verl-olmo3-physics`, the new Megatron run moved past initialization and into the first actor update, but then failed in the actor worker.
+- Remote failure signature from `/tmp/ray/session_latest/logs/worker-6730908144e2290b02b67ffabd591ff3d16e5ac03c7434c182010f1f-03000000-1539274.err`:
+  - `RuntimeError: Size does not match at dimension 1 expected index [1, 8192, 100] to be no larger than self [1, 240, 151936] apart from dimension 2`
+  - crash site:
+    - `verl/workers/actor/megatron_actor.py`, inside `logits_processor`
+    - `topk_logits = torch.gather(full_logits, dim=-1, index=current_topk_indices)`
+- Diagnosis:
+  - `teacher_topk_indices` coming from the ref worker is response-aligned and padded to `[bs, max_response_len, k]`
+  - the training-time Megatron `logits_processor` is operating on packed active tokens, so its TP-gathered logits are sequence-aligned with only the active positions, e.g. `[bs, active_seq_len, vocab]`
+  - the code incorrectly treated the padded response-aligned teacher support as if it were already aligned to the packed logits
+- Local fix applied:
+  - when the teacher support length does not match the packed-logit sequence length, gather only on the active response positions
+  - build a response-aligned `student_topk_log_probs` tensor from those active positions
+  - skip the extra `[:, -response_length - 1 : -1, :]` reslice when the forward path has already returned response-aligned top-k log-probs
+- Local verification:
+  - `python3 -m compileall verl/workers/actor/megatron_actor.py` passed
+- Next step:
+  - push this alignment fix
+  - rerun the same manual Qwen Physics Megatron job on `verl-olmo3-physics`
+  - verify it gets past the first actor update and emits `training/global_step`
