@@ -755,6 +755,56 @@ class MegatronPPOActor(BasePPOActor):
                             pg_metrics["self_distillation/teacher_mass_on_student_support_upper_bound_mean"] = (
                                 response_teacher_mass_upper[active_sdpo_mask].mean().detach().item()
                             )
+                    selected_log_probs_from_full_abs_diff = output.get("selected_log_probs_from_full_abs_diff")
+                    if selected_log_probs_from_full_abs_diff is not None:
+                        if selected_log_probs_from_full_abs_diff.shape[1] == response_length:
+                            response_selected_logprob_abs_diff = selected_log_probs_from_full_abs_diff.contiguous()
+                        else:
+                            response_selected_logprob_abs_diff = selected_log_probs_from_full_abs_diff[
+                                :, -response_length - 1 : -1
+                            ].contiguous()
+                        if active_sdpo_mask.any():
+                            selected_logprob_abs_diff_values = response_selected_logprob_abs_diff[active_sdpo_mask]
+                            pg_metrics["self_distillation/selected_logprob_from_full_abs_diff_mean"] = (
+                                selected_logprob_abs_diff_values.mean().detach().item()
+                            )
+                            pg_metrics["self_distillation/selected_logprob_from_full_abs_diff_max"] = (
+                                selected_logprob_abs_diff_values.max().detach().item()
+                            )
+                    selected_log_probs_from_full_fp32_abs_diff = output.get(
+                        "selected_log_probs_from_full_fp32_abs_diff"
+                    )
+                    if selected_log_probs_from_full_fp32_abs_diff is not None:
+                        if selected_log_probs_from_full_fp32_abs_diff.shape[1] == response_length:
+                            response_selected_logprob_fp32_abs_diff = (
+                                selected_log_probs_from_full_fp32_abs_diff.contiguous()
+                            )
+                        else:
+                            response_selected_logprob_fp32_abs_diff = selected_log_probs_from_full_fp32_abs_diff[
+                                :, -response_length - 1 : -1
+                            ].contiguous()
+                        if active_sdpo_mask.any():
+                            selected_logprob_fp32_abs_diff_values = response_selected_logprob_fp32_abs_diff[
+                                active_sdpo_mask
+                            ]
+                            pg_metrics["self_distillation/selected_logprob_from_full_fp32_abs_diff_mean"] = (
+                                selected_logprob_fp32_abs_diff_values.mean().detach().item()
+                            )
+                            pg_metrics["self_distillation/selected_logprob_from_full_fp32_abs_diff_max"] = (
+                                selected_logprob_fp32_abs_diff_values.max().detach().item()
+                            )
+                    student_top1_prob_from_full_fp32 = output.get("student_top1_prob_from_full_fp32")
+                    if student_top1_prob_from_full_fp32 is not None:
+                        if student_top1_prob_from_full_fp32.shape[1] == response_length:
+                            response_student_top1_prob_from_full_fp32 = student_top1_prob_from_full_fp32.contiguous()
+                        else:
+                            response_student_top1_prob_from_full_fp32 = student_top1_prob_from_full_fp32[
+                                :, -response_length - 1 : -1
+                            ].contiguous()
+                        if active_sdpo_mask.any():
+                            pg_metrics["self_distillation/student_top1_prob_from_full_fp32_mean"] = (
+                                response_student_top1_prob_from_full_fp32[active_sdpo_mask].mean().detach().item()
+                            )
                     pg_metrics["self_distillation/empty_target_batch"] = (
                         data["self_distillation_mask"].sum().item() == 0
                     )
@@ -944,17 +994,43 @@ class MegatronPPOActor(BasePPOActor):
                     if should_compute_topk:
                         # SDPO top-k support must be global over the vocabulary, not local to a TP shard.
                         full_logits = tensor_parallel.gather_from_tensor_model_parallel_region(logits)
+                        selected_logits_from_full = torch.gather(
+                            full_logits, dim=-1, index=label.unsqueeze(-1).to(torch.int64)
+                        ).squeeze(-1)
+                        logsumexp = torch.logsumexp(full_logits, dim=-1, keepdim=True)
+                        selected_log_probs_from_full = selected_logits_from_full - logsumexp.squeeze(-1)
+                        selected_log_probs_from_full = selected_log_probs_from_full.masked_fill(~label_mask, 0.0)
+                        ret["selected_log_probs_from_full_abs_diff"] = (
+                            selected_log_probs_from_full - log_probs
+                        ).abs()
+                        if log_student_support_metrics:
+                            full_logits_fp32 = full_logits.float()
+                            selected_logits_from_full_fp32 = torch.gather(
+                                full_logits_fp32, dim=-1, index=label.unsqueeze(-1).to(torch.int64)
+                            ).squeeze(-1)
+                            logsumexp_fp32 = torch.logsumexp(full_logits_fp32, dim=-1, keepdim=True)
+                            selected_log_probs_from_full_fp32 = (
+                                selected_logits_from_full_fp32 - logsumexp_fp32.squeeze(-1)
+                            )
+                            selected_log_probs_from_full_fp32 = selected_log_probs_from_full_fp32.masked_fill(
+                                ~label_mask, 0.0
+                            )
+                            ret["selected_log_probs_from_full_fp32_abs_diff"] = (
+                                selected_log_probs_from_full_fp32 - log_probs.float()
+                            ).abs()
+                            student_top1_logits_fp32 = full_logits_fp32.max(dim=-1).values
+                            ret["student_top1_prob_from_full_fp32"] = torch.exp(
+                                student_top1_logits_fp32 - logsumexp_fp32.squeeze(-1)
+                            ).masked_fill(~label_mask, 0.0)
                         if teacher_topk_indices is None:
                             topk = min(distill_topk, full_logits.size(-1))
                             topk_logits, current_topk_indices = torch.topk(full_logits, topk, dim=-1)
-                            logsumexp = torch.logsumexp(full_logits, dim=-1, keepdim=True)
                             ret["topk_log_probs"] = topk_logits - logsumexp
                             if return_topk_indices:
                                 ret["topk_indices"] = current_topk_indices
                         elif teacher_topk_indices.shape[1] == full_logits.shape[1]:
                             current_topk_indices = teacher_topk_indices.to(full_logits.device)
                             topk_logits = torch.gather(full_logits, dim=-1, index=current_topk_indices)
-                            logsumexp = torch.logsumexp(full_logits, dim=-1, keepdim=True)
                             ret["topk_log_probs"] = topk_logits - logsumexp
                             student_top1 = full_logits.argmax(dim=-1)
                             ret["student_mass_on_teacher_support"] = torch.exp(
