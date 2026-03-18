@@ -591,8 +591,10 @@ class MegatronPPOActor(BasePPOActor):
                                 :, -response_length - 1 : -1, :
                             ].contiguous()
                     debug_dir = meta_info.get("debug_sdpo_dump_dir")
-                    debug_step = int(meta_info.get("debug_sdpo_dump_step", 1))
-                    current_step = int(meta_info.get("debug_sdpo_global_step", -1))
+                    debug_step_raw = meta_info.get("debug_sdpo_dump_step")
+                    current_step_raw = meta_info.get("debug_sdpo_global_step")
+                    debug_step = int(debug_step_raw) if debug_step_raw is not None else 1
+                    current_step = int(current_step_raw) if current_step_raw is not None else -1
                     if (
                         debug_dir
                         and current_step == debug_step
