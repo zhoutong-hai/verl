@@ -852,6 +852,7 @@ class RayPPOTrainer:
         ref_input = DataProto.from_dict(
             tensors={
                 "responses": teacher_batch.batch["responses"],
+                "response_mask": teacher_batch.batch["response_mask"],
                 "input_ids": teacher_batch.batch["teacher_input_ids"],
                 "attention_mask": teacher_batch.batch["teacher_attention_mask"],
                 "position_ids": teacher_batch.batch["teacher_position_ids"],
