@@ -1,8 +1,9 @@
 # Megatron SDPO Implementation Review
 
 **Date:** 2026-03-16
+**Updated:** 2026-03-18
 **Branch:** `codex/sdpo-megatron-v070`
-**Context:** Review of the Megatron SDPO port vs the upstream FSDP SDPO path, with focus on correctness, capability gaps, and improvement opportunities.
+**Context:** Review of the Megatron SDPO port vs the upstream FSDP SDPO path, with focus on correctness, capability gaps, improvement opportunities, and the later collapse postmortem after full-logit trainer-ref support was implemented.
 
 ## Architecture Overview
 
@@ -78,7 +79,9 @@ There is also a valid teacher-staleness concern in the Megatron design, but it s
 
 One more correction that matters when reading the rest of this document: the code already guards against using the SDPO EMA teacher as a KL reference at the same time. `main_ppo.py` rejects SDPO when `use_kl_loss` or `use_kl_in_reward` is enabled, so the "dual-purpose ref module" concern is a limitation to keep in mind for future extensions, not a silent bug in the current launches.
 
-## Issues
+## Historical Issues
+
+The issue list below reflects the pre-fix review state from March 16, before the trainer-ref full-logit path was fully debugged. It remains useful historical context, but several points below are no longer the exact current-branch status after the March 18 fixes and postmortem.
 
 ### Issue 1 (Major): `full_logit_distillation` not supported — forces weaker reverse KL
 
@@ -190,7 +193,7 @@ This is good and unique to the Megatron path. However, the Megatron path does **
 
 ## Recommended Priority
 
-1. **Enable `full_logit_distillation` for Megatron** — this is the biggest capability gap. Requires extending the ref worker to return top-k logits from the teacher forward pass. This would also unblock `alpha: 0.5` (JSD).
+1. **Keep the now-enabled full-logit trainer-ref path numerically correct** — the biggest collapse we observed came from incorrect full-logit handling rather than from a high-level SDPO design choice.
 2. **Add config parity** — set `remove_thinking_from_demonstration: true` and `clip_ratio_high: 0.28` in the Megatron config.
 3. **Guard against dual-purpose ref_module** — at minimum add a warning/error when `use_kl_loss` or `use_kl_in_reward` is enabled alongside SDPO EMA.
 4. **Consider adding entropy regularization** to the SDPO branch (both FSDP and Megatron).
@@ -427,6 +430,239 @@ The real Megatron fix is:
   - make outer-step-fixed teacher targets an explicit design choice
 
 That is the cleanest path from the current Megatron approximation to a large-scale SDPO implementation that still resembles the paper where it matters most.
+
+## Proposed Next Design: Student-Support Top-k Under `trainer_ref`
+
+Now that the catastrophic full-logit bug is fixed and the corrected Megatron run is stable, the remaining parity gap with FSDP is better understood as an **architecture/semantics** question rather than a correctness failure.
+
+The main remaining semantic difference is:
+
+- FSDP effectively distills on the **student's current top-k support**
+- current Megatron `trainer_ref` distills on the **teacher's cached top-k support**
+
+The earlier collapse investigation weakened the narrow hypothesis that "student top-1 escapes teacher support" was the root cause of the catastrophic failure. But that does **not** mean teacher-support and student-support are equivalent. For parity with the healthy FSDP path, the next design target should still be:
+
+- keep `teacher_scoring_mode=trainer_ref`
+- keep the actor student-only
+- change support selection from `teacher_topk` to **student-support top-k**
+
+### Goal
+
+The target semantics are:
+
+1. the actor computes `student_topk_indices` from the outer-step student state `theta_t`
+2. the ref worker scores the EMA teacher on **exactly that support**
+3. the actor update recomputes current student log-probs on the same frozen support
+4. the shared SDPO loss runs on:
+   - `student_topk_log_probs`
+   - `teacher_topk_log_probs`
+
+This preserves the scalable Megatron shape:
+
+- no teacher colocated inside the actor
+- compressed top-k targets only
+- teacher still refreshed by EMA once per outer step
+
+while moving much closer to the FSDP semantics that already work well.
+
+### Why this is still the right next step
+
+The raw-logit mutation bug explained the old catastrophic collapse, but it did **not** erase the remaining FSDP/Megatron difference.
+
+Today the corrected Megatron run is stable but still trails the healthy FSDP baseline. The most plausible remaining gap is still:
+
+- actor-local student-support scoring in FSDP
+- versus cached teacher-support scoring in Megatron
+
+Student-support top-k is attractive because it gives a more direct correction when the student begins drifting toward bad alternatives. Even if the student's top-1 token stays inside the teacher support, the broader student support can still differ in meaningful ways that the teacher-support path only sees through the tail bucket.
+
+### Important timing nuance
+
+This design does introduce a controlled form of staleness:
+
+- `student_topk_indices` are computed once from the outer-step student state `theta_t`
+- they are then reused during that outer update
+- they are **not** recomputed after every minibatch step
+
+So the support is:
+
+- fresh relative to the rollout/start-of-update student
+- stale relative to later inner-loop-updated student states
+
+That is acceptable if we make the design explicit and keep:
+
+- `ppo_epochs = 1`
+
+This is the key compromise:
+
+- not as fresh as FSDP actor-local scoring
+- much closer to FSDP semantics than teacher-support top-k
+- still realistic for very large models, including the intended 700B direction
+
+### Proposed dataflow
+
+The intended outer-step flow is:
+
+```mermaid
+sequenceDiagram
+    participant T as "ray_trainer"
+    participant A as "actor worker"
+    participant R as "ref worker (EMA teacher)"
+    participant L as "shared SDPO loss"
+
+    T->>A: "Send rollout batch B_t for no-grad support prepass"
+    A->>A: "Compute student_topk_indices on active response tokens using theta_t"
+    A-->>T: "Return packed student_topk_indices"
+
+    T->>T: "Build reprompted teacher batch"
+    T->>R: "Score teacher on provided student_topk_indices"
+    R->>R: "Gather teacher logits on provided support and normalize"
+    R-->>T: "Return teacher_topk_log_probs (+ support indices)"
+
+    T->>T: "Union teacher targets into rollout batch"
+    Note over T,A: "Support is now frozen for this outer update"
+
+    T->>A: "Run actor update on B_t with frozen support"
+    A->>A: "Recompute current student_topk_log_probs on same support"
+    A->>L: "Call compute_self_distillation_loss(...)"
+    L-->>A: "Return SDPO loss and metrics"
+
+    A->>A: "Optimizer step(s) over outer batch"
+    A->>R: "Refresh EMA teacher once at end of outer step"
+```
+
+The important detail is that the actor prepass is **student-only** and **no-grad**. It does not require colocating the teacher in the actor update path.
+
+The staleness boundary is explicit:
+
+- `student_topk_indices` are fresh with respect to `theta_t`
+- once the trainer unions teacher targets back into the batch, the support is fixed for that outer update
+- later minibatch updates reuse that frozen support, which is why `ppo_epochs = 1` remains important
+
+### Proposed batch contract
+
+The new `trainer_ref` student-support path should pass these fields through `DataProto`:
+
+- `teacher_topk_indices`: shape `[n_active_tokens, k]` or equivalent packed representation
+- `teacher_topk_log_probs`: shape `[n_active_tokens, k]`
+- `student_topk_indices`: optional for debugging / invariants if not identical by construction
+- `self_distillation_mask`
+- existing sampled-token `teacher_log_probs` may be kept temporarily for debugging and backward compatibility
+
+For scale, this should use an **active-token-packed** representation rather than padded `[bs, response_len, k]` tensors wherever possible.
+
+### Proposed file-level changes
+
+#### 1. `verl/workers/actor/megatron_actor.py`
+
+Add a no-grad student-support prepass and a reusable support-aware scoring primitive.
+
+Concretely:
+
+- add a helper that can compute `student_topk_indices` on active response tokens from the current actor weights without building gradients
+- extend the existing top-k/full-logit path so it can score the student on **provided support indices**, not only self-selected support
+- keep the selected-token/full-logit invariant check available for this path
+- continue to emit response-aligned tensors only at the final boundary where the shared SDPO loss expects them
+
+The actor update path should then:
+
+1. receive frozen support indices for the current outer step
+2. recompute `student_topk_log_probs` on that support with the current actor state
+3. call `compute_self_distillation_loss(...)`
+
+#### 2. `verl/trainer/ppo/ray_trainer.py`
+
+Insert a student-support preparation phase before ref-side teacher scoring.
+
+Concretely:
+
+- when `teacher_scoring_mode=trainer_ref` and `support_mode=student_topk`:
+  1. ask the actor worker for `student_topk_indices` on the current rollout batch
+  2. build / keep the reprompted teacher batch as today
+  3. pass both the teacher batch and the provided support indices to the ref worker
+  4. union the returned teacher targets back into the rollout batch
+
+This should happen once per outer update before actor optimization begins.
+
+#### 3. `verl/workers/megatron_workers.py`
+
+Extend the ref-worker distillation API so the teacher can be scored on provided support.
+
+Concretely:
+
+- extend `compute_ref_distillation_targets(...)` with a support mode like:
+  - `support_mode="teacher_topk"`
+  - `support_mode="student_topk"`
+- when student support is provided:
+  - do **not** compute a new teacher-selected support
+  - instead gather teacher logits on the supplied indices
+  - normalize to `teacher_topk_log_probs` on that support
+
+This keeps the teacher in the ref worker while still matching the actor-selected support.
+
+#### 4. `verl/workers/config/actor.py` and configs
+
+Add an explicit support-selection knob and constraints.
+
+Recommended config additions:
+
+- `support_mode: "teacher_topk" | "student_topk"`
+- default current stable path to `"teacher_topk"` for backward compatibility
+- use `"student_topk"` for the next parity-focused experiments
+
+Recommended runtime guards:
+
+- require `full_logit_distillation=true` for `support_mode="student_topk"`
+- require `distillation_topk is not None`
+- require `ppo_epochs == 1`
+
+### Suggested implementation order
+
+1. **Plumb support mode through config**
+   - add `support_mode`
+   - keep current teacher-topk path as default
+
+2. **Add actor no-grad support extraction**
+   - export packed `student_topk_indices`
+   - add minimal shape/assertion logging
+
+3. **Teach ref worker to score provided support**
+   - same teacher batch as today
+   - different support selection
+
+4. **Run a same-batch diff**
+   - compare corrected Megatron `teacher_topk` vs new Megatron `student_topk`
+   - then compare new Megatron `student_topk` against FSDP on the same cached rollout batch
+
+5. **Only after parity looks good, consider making `student_topk` the new recommended path**
+
+### Risks and tradeoffs
+
+This design is not free:
+
+- it adds one extra actor-to-trainer/ref handoff per outer step
+- support is still outer-step-frozen rather than minibatch-fresh
+- packed active-token bookkeeping has to stay exact
+
+But compared with the alternatives, it is the best compromise:
+
+- better semantic parity than teacher-support top-k
+- much cheaper than colocating teacher and student in the actor loop
+- still realistic at very large scale
+
+### Recommended decision
+
+For the next parity iteration, the recommendation should be:
+
+- keep the corrected full-logit `trainer_ref` path
+- add `support_mode="student_topk"` under `trainer_ref`
+- treat it as the primary parity experiment against FSDP
+
+In short:
+
+- the collapse bug is fixed
+- the remaining gap is likely semantic
+- **student-support top-k under `trainer_ref` is the right next design to build**
 
 ## Appendix: Teacher Refresh vs PPO Inner Loop
 
@@ -746,3 +982,125 @@ That is why the proposed full-logit Megatron fix is based on:
 - `teacher_topk_log_probs`
 
 rather than full dense vocabulary logits.
+
+## Appendix: Collapse Bug Postmortem
+
+This appendix records the actual collapsing issues we hit while bringing Megatron full-logit SDPO up to parity with the healthy Qwen Physics FSDP baseline, and the implementation fixes that resolved them.
+
+### Symptom pattern before the real fix
+
+The broken Megatron full-logit runs had a very consistent failure signature:
+
+- early training looked plausible for a few steps
+- then `response_length/mean` exploded into the multi-thousand-token range
+- `response_length/clip_ratio` rose toward `1.0`
+- `success_group_fraction` and `reprompt_sample_fraction` collapsed
+- `empty_target_batch` approached `1.0`
+- validation fell to near-zero or exactly zero
+
+This originally looked like an SDPO behavioral problem, but the final root cause was lower-level and implementation-specific.
+
+### Root cause: full-logit SDPO was reading mutated logits
+
+The main correctness bug was in `verl/workers/actor/megatron_actor.py`.
+
+Megatron's selected-token log-prob path uses `vocab_parallel_log_probs_from_logits(...)`. Under the hood, Megatron-LM's vocab-parallel cross entropy mutates shard logits in place:
+
+- subtract max
+- exponentiate
+- normalize
+
+The Megatron SDPO code was then reusing those same shard logits for the gathered full-logit/top-k path. That meant the two branches were no longer reading the same distribution:
+
+- selected-token log-probs came from one effective tensor state
+- top-k/full-logit SDPO targets came from another
+
+That broke the SDPO distribution math badly enough to destabilize training.
+
+The key invariant that exposed this bug was:
+
+- compare the selected-token log-prob from `vocab_parallel_log_probs_from_logits(...)`
+- against the same selected-token log-prob reconstructed from gathered `full_logits.log_softmax(...)`
+
+Before the fix, the mismatch was catastrophic:
+
+- `self_distillation/selected_logprob_from_full_abs_diff_mean ~= 10.8`
+
+After the fix, it dropped to numerical noise:
+
+- `~= 5e-07`
+
+### Correct implementation fix
+
+The correct fix is now in `verl/workers/actor/megatron_actor.py:991-1001`.
+
+Implementation details:
+
+1. Detect when the same forward pass needs both:
+   - selected-token log-probs
+   - gathered full-logit/top-k SDPO targets
+2. Clone the shard logits before calling the selected-token log-prob path if top-k/full-logit SDPO is active.
+3. Use the preserved raw shard logits for:
+   - `gather_from_tensor_model_parallel_region(logits)`
+   - top-k extraction
+   - gathered full-logit probability reconstruction
+
+In other words, the fix is:
+
+- **do not** gather logits after the in-place cross-entropy mutation
+- **do** preserve raw logits for the SDPO full-logit path
+
+This was the fix that removed the immediate collapse regime.
+
+### Secondary correctness fixes that were also needed
+
+These were real implementation bugs, but they were not the main cause of the catastrophic collapse:
+
+1. Deterministic demonstration selection in `verl/trainer/ppo/ray_trainer.py:765-771`
+   - successful sibling choice previously depended on batch order
+   - after batch balancing, FSDP and Megatron could choose different demonstrations
+   - fixed by sorting successful candidates deterministically by score, then length, then text
+
+2. Response-mask fallback in `verl/workers/actor/megatron_actor.py:910-913`
+   - if `response_mask` is absent, rebuild it from `attention_mask[:, -response_length:]`
+
+3. Label-mask off-by-one fix in `verl/workers/actor/megatron_actor.py:916-920`
+   - make `label_mask` a true one-token-left shift of `response_mask`
+   - this removed the short-response `r+1` target bug
+
+4. Packed-vs-response alignment fixes in `verl/workers/actor/megatron_actor.py:1077-1093`
+   - ensure response-aligned teacher top-k tensors line up with active packed logits
+
+5. Metric reducer robustness in `verl/utils/metric/utils.py:23-50`
+   - debugging tensors and short sequences now reduce safely to scalars
+   - this did not change training behavior, but it prevented debug instrumentation from crashing logging
+
+### What hypotheses were weakened by the fix
+
+Several earlier hypotheses were only partially right, or became much less important after the raw-logit fix:
+
+- **Student escaped teacher top-k support**
+  - weakened as the main collapse explanation
+  - may still matter for residual FSDP-vs-Megatron quality gaps, but it was not the catastrophic bug
+
+- **Megatron was just behaviorally unstable on this task**
+  - weakened
+  - once the full-logit path was corrected, Megatron stopped entering the old early-collapse regime
+
+- **The collapse was mainly a reward-format issue**
+  - weakened
+  - reward-format brittleness can still hurt quality, but it did not explain the old implementation-level failure
+
+### Post-fix status
+
+After the raw-logit fix:
+
+- the 20-step Megatron smoke run completed cleanly
+- no response-length explosion occurred
+- no SDPO target-starvation collapse occurred
+- the invariant stayed numerically tight through the full smoke run
+
+The later full corrected Megatron run on Qwen Physics also stayed healthy deep into training, which is strong evidence that:
+
+- the old immediate collapse was implementation-driven
+- the current remaining FSDP-vs-Megatron gap is now an architectural/performance question, not a catastrophic correctness failure
