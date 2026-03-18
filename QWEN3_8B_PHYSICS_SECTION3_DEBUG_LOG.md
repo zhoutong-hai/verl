@@ -154,6 +154,11 @@ sky launch -c verl-olmo3-physics \
   - `self_distillation/success_group_fraction = 1.0`
   - `self_distillation/reprompt_sample_fraction = 0.99609375`
   - `self_distillation/empty_target_batch = 0.00390625`
+- Benchmark run metadata:
+  - W&B run id: `lgteso46`
+  - W&B URL: <https://wandb.ai/hippocraticai/olmo3_7b_section3_physics/runs/lgteso46>
+  - experiment name: `qwen3_8b_section3_physics_sdpo_fsdp_20260317_011603`
+  - note: this Qwen FSDP run was logged under the reused project name `olmo3_7b_section3_physics`
 - Generations stayed compact and well-formed rather than growing into the multi-thousand-token drift seen with OLMo.
 - This is the strongest evidence so far that the OLMo result was dominated by the `Olmo3` runtime mismatch on `vllm 0.10.0`, not by a general SDPO FSDP failure on Section 3 Physics.
 
