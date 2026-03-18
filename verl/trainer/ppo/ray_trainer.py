@@ -750,7 +750,11 @@ class RayPPOTrainer:
         return feedback_list
 
     def _collect_solutions_by_uid(
-        self, batch: DataProto, reward_tensor: torch.Tensor, success_reward_threshold: float
+        self,
+        batch: DataProto,
+        reward_tensor: torch.Tensor,
+        response_texts: list[str],
+        success_reward_threshold: float,
     ) -> dict[Any, list[int]]:
         seq_scores = reward_tensor.sum(dim=-1).detach().cpu().numpy()
         uids = batch.non_tensor_batch["uid"]
@@ -758,6 +762,13 @@ class RayPPOTrainer:
         for idx, uid in enumerate(uids):
             if seq_scores[idx] >= success_reward_threshold:
                 success_by_uid[uid].append(idx)
+        # Keep the chosen demonstration stable even if batch balancing reorders
+        # successful siblings differently across backends.
+        for uid, indices in success_by_uid.items():
+            success_by_uid[uid] = sorted(
+                indices,
+                key=lambda j: (-float(seq_scores[j]), len(response_texts[j]), response_texts[j]),
+            )
         return success_by_uid
 
     @staticmethod
@@ -867,6 +878,7 @@ class RayPPOTrainer:
         success_by_uid = self._collect_solutions_by_uid(
             batch,
             reward_tensor,
+            response_texts,
             success_reward_threshold=self_distillation_cfg.success_reward_threshold,
         )
         solution_strs = [
