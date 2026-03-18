@@ -1716,7 +1716,8 @@ class RayPPOTrainer:
                 return
 
         if self.config.actor_rollout_ref.rollout.get("skip_rollout", False):
-            rollout_skip = RolloutSkip(self.config, self.actor_rollout_wg)
+            rollout_target = self.async_rollout_manager if self.async_rollout_mode else self.actor_rollout_wg
+            rollout_skip = RolloutSkip(self.config, rollout_target)
             rollout_skip.wrap_generate_sequences()
 
         # add tqdm
