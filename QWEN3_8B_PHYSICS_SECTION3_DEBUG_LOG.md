@@ -879,6 +879,18 @@ sky launch -c verl-olmo3-physics \
   - `empty_target_batch = 0.03516`
   - `actor/grad_norm = 0.23488`
   - `selected_logprob_from_full_abs_diff_mean = 5.08e-07`
+- The full 20-step smoke run also finishes healthy:
+  - step `20`
+  - `val-core/sciknoweval/acc/mean@16 = 0.64688`
+  - `val-core/sciknoweval/acc/best@16/mean = 0.85637`
+  - `val-core/sciknoweval/acc/maj@16/mean = 0.66915`
+  - `response_length/mean = 393.4`
+  - `response_length/clip_ratio = 0.0`
+  - `success_group_fraction = 0.90625`
+  - `reprompt_sample_fraction = 0.90234`
+  - `empty_target_batch = 0.09766`
+  - `incorrect_format/mean@16 = 0.99531`
+  - `selected_logprob_from_full_abs_diff_mean = 4.98e-07`
 
 #### Updated conclusion after the corrected smoke run
 
@@ -888,11 +900,13 @@ sky launch -c verl-olmo3-physics \
   - no collapse to zero validation by step `10`
 - The corrected Megatron run is healthy well past the old failure window:
   - step `15` validation is stronger than both step `5` and step `10`
-  - the invariant remains numerically tight through the latest observed step
+  - the full 20-step smoke run finishes without entering the old collapse regime
+  - the invariant remains numerically tight through the final observed step
 - Current best conclusion:
   - the in-place cross-entropy mutation bug was a real correctness bug in Megatron full-logit SDPO
   - fixing it materially changed training behavior, not just diagnostics
   - this is strong evidence that the previous immediate Megatron collapse was implementation-driven
+  - the corrected Megatron path now looks healthy enough to justify a full-length parity run
 - Remaining caveat:
   - this still does **not** prove full long-run parity with FSDP
   - the next fair check is a longer corrected Megatron run and comparison of the best `1h` and `5h` windows against the healthy FSDP Physics baseline
