@@ -567,3 +567,270 @@ sky launch -c verl-olmo3-physics \
   - made [reduce_metrics](/Users/zhoutong/code/verl/verl/utils/metric/utils.py) coerce metric payloads into scalars before applying `mean` / `max` / `min`
   - this keeps the training loop robust even when debug instrumentation occasionally emits tensors, arrays, or short numeric sequences
 - `python3 -m compileall` passed after the reducer patch.
+
+### [Observed] Teacher-support metrics do not collapse ahead of the Megatron failure
+
+- Diagnostic rerun:
+  - `/root/sky_logs/manual-megatron-20260317_225010/run.log`
+- New metrics stayed nearly flat from step `1` through step `10`:
+  - `student_mass_on_teacher_support_mean`
+    - step `1`: `0.0006688`
+    - step `5`: `0.0006688`
+    - step `10`: `0.0006706`
+  - `student_top1_in_teacher_support_fraction`
+    - step `1`: `0.9972`
+    - step `5`: `0.9978`
+    - step `10`: `1.0000`
+  - `student_top1_matches_teacher_top1_fraction`
+    - step `1`: `0.9351`
+    - step `5`: `0.9388`
+    - step `10`: `0.9433`
+- Meanwhile the run still degraded sharply:
+  - `success_group_fraction`
+    - step `5`: `1.0`
+    - step `10`: `0.3125`
+  - `reprompt_sample_fraction`
+    - step `5`: `0.9883`
+    - step `10`: `0.2930`
+  - `response_length/mean`
+    - step `5`: `692.6`
+    - step `10`: `6684.5`
+  - `val-core/sciknoweval/acc/mean@16`
+    - step `5`: `0.5805`
+    - step `10`: `0.0008`
+- Interpretation:
+  - this weakens the simple version of the current hypothesis that "Megatron fails because the student's top tokens escape the teacher's cached top-k support"
+  - the student top-1 token remains almost always inside teacher support, and top-1 agreement stays high, even while output quality collapses
+- Important caveat:
+  - `student_mass_on_teacher_support_mean` is suspiciously tiny but also almost perfectly flat from healthy to collapsed steps
+  - so this metric may still need validation before using it as a strong standalone signal
+- Current takeaway:
+  - we have enough evidence to say the collapse is probably **not** primarily explained by simple student-top-token escape from teacher top-k support
+  - the broader "Megatron loss semantics differ from healthy FSDP" concern still stands, but this particular mechanism is no longer the leading explanation
+
+### [Completed] Step-1 FSDP vs Megatron SDPO debug dumps and offline tensor diff
+
+- Collected step-`1` SDPO debug artifacts for both paths:
+  - FSDP:
+    - `/hai/zhoutong/section3_physics_assets/sdpo_debug_compare/fsdp_qwen/step_0001`
+  - Megatron:
+    - `/hai/zhoutong/section3_physics_assets/sdpo_debug_compare/megatron_qwen/step_0001`
+- Each step directory now includes:
+  - `trainer_summary.json`
+  - `trainer_batch.pkl`
+  - `teacher_batch.pkl`
+  - `actor_pre_loss_rank0.pt`
+  - Megatron also includes `teacher_targets.pkl`
+- Offline comparison output:
+  - `/hai/zhoutong/section3_physics_assets/sdpo_debug_compare/compare_fsdp_vs_megatron_step1.json`
+
+#### Highest-signal compare results
+
+- Actor-side metadata confirms the intended architecture split:
+  - FSDP:
+    - `support_source = student_topk`
+    - `teacher_scoring_mode = actor_worker`
+  - Megatron:
+    - `support_source = teacher_topk`
+    - `teacher_scoring_mode = trainer_ref`
+- The pre-loss tensors are already different at step `1`:
+  - `active_sdpo_tokens`
+    - FSDP: `85`
+    - Megatron: `92`
+  - `response_mask_equal_fraction`: `0.9991455`
+  - `student_log_probs_masked_mean_abs_diff`: `0.2560`
+  - `teacher_log_probs_masked_mean_abs_diff`: `0.6799`
+  - `support_index_exact_match_fraction`: `0.9887`
+  - `support_set_exact_match_fraction`: `0.9886`
+- Trainer-side teacher context also differs:
+  - FSDP `teacher_input_ids` length: `11152`
+  - Megatron `teacher_input_ids` length: `10380`
+
+#### Interpretation
+
+- This gives us the first concrete tensor-level evidence that the two implementations are **not** feeding the shared SDPO loss the same inputs, even at the first debug step.
+- The largest mismatches are not the support indices themselves, which are close but not identical, but:
+  - active SDPO token counts
+  - masked student log-probs
+  - masked teacher log-probs
+  - teacher-context sequence length
+- Important limitation:
+  - this was a step-`1` compare across two separate runs, not a strict replay of one identical rollout batch through both implementations
+  - so this is strong evidence of divergence, but not yet proof that any single tensor mismatch is the root cause
+- Current practical takeaway:
+  - the next highest-value debugging step is still a stricter replay-style compare on one shared rollout batch if we need to isolate the exact semantic delta
+  - but the current diff already narrows the problem from "high-level training behavior" to "the two codepaths are constructing materially different SDPO supervision at loss time"
+
+### [Resolved Locally] `skip_rollout` was not affecting async rollout runs
+
+- The first attempt at a shared-rollout compare did not actually reuse rollout data.
+- Root cause:
+  - [RolloutSkip](/Users/zhoutong/code/verl/verl/utils/rollout_skip.py) only wrapped `actor_rollout_wg.generate_sequences()`
+  - but these Physics runs use async rollout mode, so generation goes through `self.async_rollout_manager.generate_sequences(...)` in [ray_trainer.py](/Users/zhoutong/code/verl/verl/trainer/ppo/ray_trainer.py)
+- Fix:
+  - patched [ray_trainer.py](/Users/zhoutong/code/verl/verl/trainer/ppo/ray_trainer.py) so `skip_rollout=true` wraps the async rollout manager when `self.async_rollout_mode` is enabled
+- Commit:
+  - `04598039` — `Enable rollout skip for async manager`
+
+### [Completed] Shared-rollout replay compare removes most student-side drift and isolates a teacher-side gap
+
+- Shared rollout cache:
+  - `/hai/zhoutong/section3_physics_assets/sdpo_debug_compare/shared_rollout_qwen_step1_v2/shared_qwen_physics_step1_v2_shared_qwen_physics_GBS32__N8`
+- FSDP replay dump:
+  - `/hai/zhoutong/section3_physics_assets/sdpo_debug_compare/fsdp_qwen_sharedrollout_v2/step_0001`
+- Megatron replay dump:
+  - `/hai/zhoutong/section3_physics_assets/sdpo_debug_compare/megatron_qwen_sharedrollout_v2/step_0001`
+- Compare output:
+  - `/hai/zhoutong/section3_physics_assets/sdpo_debug_compare/compare_fsdp_vs_megatron_sharedrollout_v2_step1.json`
+- Megatron log now explicitly shows cache reuse:
+  - `[RolloutSkip()] Successfully load pre-generated data from ... shared_qwen_physics_step1_v2_shared_qwen_physics_GBS32__N8`
+
+#### Highest-signal shared-rollout results
+
+- Actor-side comparison on the dumped pre-loss sample is now much tighter on the student path:
+  - `active_sdpo_tokens`
+    - FSDP: `77`
+    - Megatron: `77`
+  - `response_mask_equal_fraction`: `1.0`
+  - `student_log_probs_masked_mean_abs_diff`: `0.00413`
+  - `support_index_exact_match_fraction`: `0.99098`
+  - `support_set_exact_match_fraction`: `0.99048`
+- But the teacher path still diverges sharply on that same shared-rollout compare:
+  - `teacher_log_probs_masked_mean_abs_diff`: `0.85524`
+  - FSDP `teacher_log_prob_mean`: `-0.27905`
+  - Megatron `teacher_log_prob_mean`: `-0.87333`
+
+#### Interpretation
+
+- This is the strongest evidence so far that the remaining semantic problem is now concentrated on the teacher side, not the student side:
+  - once both runs consume the same cached rollout
+  - the student-side SDPO tensors nearly align
+  - but teacher-side SDPO tensors still differ a lot
+- Important caveat:
+  - the trainer debug dumps are intentionally capped to `8` sequences, so the saved trainer/teacher batch subsets can still differ due to batch balancing and slicing
+  - that means trainer-batch-level equality is still a weaker signal than the actor pre-loss compare
+- Current best read:
+  - rollout randomness is no longer the main confounder
+  - simple student-forward mismatch is no longer the main issue
+  - the next investigation should focus on how teacher supervision is constructed and scored in:
+    - FSDP `actor_worker`
+    - Megatron `trainer_ref`
+
+### [Resolved Locally] Order-sensitive demo selection was the main source of the teacher-side shared-rollout gap
+
+- Additional direct check on the matched actor sample in the shared-rollout replay:
+  - before the fix:
+    - the teacher prompt text diverged at the `Correct solution:` demonstration block
+    - FSDP and Megatron were choosing different successful sibling demonstrations for the same response
+  - after the fix:
+    - matched sample teacher prompt lengths are identical: `343` vs `343`
+    - matched sample teacher prompt text is exactly equal
+- Root cause:
+  - [ray_trainer.py](/Users/zhoutong/code/verl/verl/trainer/ppo/ray_trainer.py) built `success_by_uid` in current batch order
+  - `_get_solution()` then picked `solution_idxs[0]`
+  - because `_balance_batch()` can reorder the same rollout differently across FSDP and Megatron, the chosen successful sibling demonstration could diverge across backends
+- Fix:
+  - sort successful sibling candidates deterministically before selecting the demonstration
+  - current rule sorts by:
+    - higher sequence score first
+    - shorter response first
+    - response text as a stable final key
+- Commit:
+  - `a7556680` — `Make SDPO demo selection deterministic`
+
+#### Shared-rollout compare after deterministic demo selection
+
+- Compare output:
+  - `/hai/zhoutong/section3_physics_assets/sdpo_debug_compare/compare_fsdp_vs_megatron_sharedrollout_v3_step1.json`
+- Teacher-side actor diff dropped sharply:
+  - before:
+    - `teacher_log_probs_masked_mean_abs_diff = 0.85524`
+  - after:
+    - `teacher_log_probs_masked_mean_abs_diff = 0.01855`
+- Teacher prompt shapes also aligned:
+  - FSDP `teacher_input_ids`: `10260`
+  - Megatron `teacher_input_ids`: `10260`
+- Student-side tensors remained close:
+  - `response_mask_equal_fraction = 1.0`
+  - `student_log_probs_masked_mean_abs_diff = 0.00413`
+- Current interpretation:
+  - the large teacher-side mismatch was primarily caused by order-sensitive demo selection, not by an inherent FSDP-vs-Megatron teacher-scoring mismatch
+  - the remaining small differences now look much more like backend/scoring noise than a major semantic split
+
+### [Concluded] Megatron full-logit/top-k path was reading logits after in-place cross-entropy mutation
+
+- The next diagnostic hypothesis was whether Megatron's gathered full-logit path was internally inconsistent with the selected-token log-prob path.
+- Instrumentation added in [megatron_actor.py](/Users/zhoutong/code/verl/verl/workers/actor/megatron_actor.py):
+  - `self_distillation/selected_logprob_from_full_abs_diff_mean`
+  - `self_distillation/selected_logprob_from_full_abs_diff_max`
+  - `self_distillation/selected_logprob_from_full_fp32_abs_diff_mean`
+  - `self_distillation/selected_logprob_from_full_fp32_abs_diff_max`
+  - `self_distillation/student_top1_prob_from_full_fp32_mean`
+
+#### Before fix: invariant was catastrophically broken at step 1
+
+- Run:
+  - `/root/sky_logs/manual-megatron-invariant-smoke.log`
+- Step `1`:
+  - `self_distillation/selected_logprob_from_full_abs_diff_mean = 10.79599`
+  - `self_distillation/selected_logprob_from_full_abs_diff_max = 10.93123`
+  - `self_distillation/selected_logprob_from_full_fp32_abs_diff_mean = 10.79599`
+  - `self_distillation/student_top1_prob_mean = 1.6606e-05`
+  - `self_distillation/student_top1_prob_from_full_fp32_mean = 1.6606e-05`
+  - `training_ppl = 1.32246`
+- Interpretation:
+  - this ruled out a mere precision issue, because the fp32 reconstruction was equally wrong
+  - the gathered full-logit/top-k path was not representing the same probabilities as `vocab_parallel_log_probs_from_logits(...)`
+
+#### Root cause
+
+- In Megatron-LM, `tensor_parallel.vocab_parallel_cross_entropy(...)` mutates its input shard logits in-place:
+  - subtracts the max
+  - exponentiates
+  - normalizes to local softmax probabilities
+- We were computing:
+  - selected-token log-probs via `vocab_parallel_log_probs_from_logits(logits, label)`
+  - then gathering `logits` afterward for the SDPO top-k/full-logit path
+- So the top-k/full-logit path was often operating on already-mutated tensors instead of raw logits.
+- Local Megatron reference:
+  - [cross_entropy.py](/Users/zhoutong/code/Megatron-LM/megatron/core/tensor_parallel/cross_entropy.py)
+
+#### Fix
+
+- Patch in [megatron_actor.py](/Users/zhoutong/code/verl/verl/workers/actor/megatron_actor.py):
+  - when `should_compute_topk` is true and the selected-token log-prob path would otherwise reuse `logits`,
+  - clone shard logits before calling `vocab_parallel_log_probs_from_logits(...)`
+  - preserve raw shard logits for the gathered full-logit/top-k path
+- Commit:
+  - `631b3a62` — `Preserve raw Megatron logits for SDPO top-k`
+
+#### After fix: invariant is restored at step 1
+
+- Run:
+  - `/root/sky_logs/manual-megatron-invariant2-smoke.log`
+- Step `1`:
+  - `self_distillation/selected_logprob_from_full_abs_diff_mean = 5.54e-07`
+  - `self_distillation/selected_logprob_from_full_abs_diff_max = 1.96e-06`
+  - `self_distillation/selected_logprob_from_full_fp32_abs_diff_mean = 5.54e-07`
+  - `self_distillation/student_top1_prob_mean = 0.9170`
+  - `self_distillation/student_top1_prob_from_full_fp32_mean = 0.9170`
+  - `self_distillation/student_mass_on_teacher_support_mean = 0.9969`
+  - `training_ppl = 1.32246`
+- This is the strongest implementation-level parity result so far:
+  - the selected-token log-prob path and the gathered full-logit path now agree numerically
+  - the earlier near-uniform top-k/support metrics were artifacts of the in-place mutation bug
+
+#### Early post-fix training health
+
+- Same fixed run through step `3` remains healthy:
+  - step `2`
+    - `response_length/mean = 620.6`
+    - `success_group_fraction = 0.71875`
+    - `actor/grad_norm = 0.3045`
+    - `selected_logprob_from_full_abs_diff_mean = 5.76e-07`
+  - step `3`
+    - `response_length/mean = 627.5`
+    - `success_group_fraction = 0.78125`
+    - `actor/grad_norm = 0.3173`
+    - `selected_logprob_from_full_abs_diff_mean = 5.64e-07`
+- This does **not** prove full FSDP parity yet, but it removes the biggest confirmed Megatron full-logit correctness bug found so far.
