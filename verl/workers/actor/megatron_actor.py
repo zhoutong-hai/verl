@@ -981,6 +981,12 @@ class MegatronPPOActor(BasePPOActor):
                     "clip_ratio": self.config.clip_ratio,
                     "entropy_coeff": self.config.entropy_coeff,
                     "clip_ratio_c": clip_ratio_c,
+                    "debug_sdpo_dump_dir": data.meta_info.get("debug_sdpo_dump_dir"),
+                    "debug_sdpo_dump_step": data.meta_info.get("debug_sdpo_dump_step"),
+                    "debug_sdpo_dump_once": data.meta_info.get("debug_sdpo_dump_once"),
+                    "debug_sdpo_global_step": data.meta_info.get("debug_sdpo_global_step"),
+                    "debug_sdpo_experiment_name": data.meta_info.get("debug_sdpo_experiment_name"),
+                    "debug_sdpo_actor_strategy": data.meta_info.get("debug_sdpo_actor_strategy"),
                 }
 
             if RouterReplayHelper.is_r2_record_action(self.tf_config, vp_rank):
