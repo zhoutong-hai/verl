@@ -833,4 +833,20 @@ sky launch -c verl-olmo3-physics \
     - `success_group_fraction = 0.78125`
     - `actor/grad_norm = 0.3173`
     - `selected_logprob_from_full_abs_diff_mean = 5.64e-07`
-- This does **not** prove full FSDP parity yet, but it removes the biggest confirmed Megatron full-logit correctness bug found so far.
+- Step `4` also stays stable:
+  - `response_length/mean = 586.9`
+  - `success_group_fraction = 0.8125`
+  - `actor/grad_norm = 0.2638`
+  - `selected_logprob_from_full_abs_diff_mean = 5.54e-07`
+- First post-fix validation at step `5` is healthy:
+  - `val-core/sciknoweval/acc/mean@16 = 0.5875`
+  - `val-core/sciknoweval/acc/best@16/mean = 0.83015`
+  - `val-core/sciknoweval/acc/maj@16/mean = 0.63576`
+  - `response_length/mean = 526.2`
+  - `response_length/clip_ratio = 0.0`
+  - `success_group_fraction = 1.0`
+  - `reprompt_sample_fraction = 0.98828`
+  - `empty_target_batch = 0.01172`
+  - `incorrect_format/mean@16 = 0.99453`
+  - `selected_logprob_from_full_abs_diff_mean = 5.37e-07`
+- This still does **not** prove full FSDP parity yet, but it removes the biggest confirmed Megatron full-logit correctness bug found so far and materially improves the early Megatron training trajectory.
