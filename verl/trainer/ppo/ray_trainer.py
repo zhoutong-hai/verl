@@ -795,7 +795,31 @@ class RayPPOTrainer:
             solution_str = self._remove_thinking_trace(solution_str)
         return solution_str
 
-    def _compute_self_distillation_teacher_log_prob(self, teacher_batch: DataProto) -> DataProto:
+    def _compute_self_distillation_student_support(self, batch: DataProto) -> DataProto:
+        raw_self_distillation_cfg = self.config.actor_rollout_ref.actor.get("self_distillation", None)
+        if raw_self_distillation_cfg is None:
+            raise ValueError("SDPO student support extraction requires actor.self_distillation config.")
+        self_distillation_cfg = omega_conf_to_dataclass(
+            raw_self_distillation_cfg,
+            dataclass_type=SelfDistillationConfig,
+        )
+        if not self_distillation_cfg.full_logit_distillation or self_distillation_cfg.distillation_topk is None:
+            raise ValueError(
+                "_compute_self_distillation_student_support requires full_logit_distillation with distillation_topk."
+            )
+        if self.use_legacy_worker_impl == "disable":
+            raise NotImplementedError(
+                "Megatron student-support extraction is not implemented for legacy worker disable."
+            )
+
+        support_input = batch.select(
+            batch_keys=["responses", "input_ids", "attention_mask", "position_ids", "response_mask"]
+        )
+        return self.actor_rollout_wg.compute_actor_distillation_support(support_input)
+
+    def _compute_self_distillation_teacher_log_prob(
+        self, teacher_batch: DataProto, actor_batch: Optional[DataProto] = None
+    ) -> DataProto:
         raw_self_distillation_cfg = self.config.actor_rollout_ref.actor.get("self_distillation", None)
         if raw_self_distillation_cfg is None:
             raise ValueError("SDPO teacher scoring requires actor.self_distillation config.")
@@ -817,6 +841,14 @@ class RayPPOTrainer:
                 tensors["teacher_topk_indices"] = torch.zeros(topk_shape, dtype=torch.int64, device=zeros.device)
             return DataProto.from_dict(tensors=tensors)
 
+        student_support = None
+        if self_distillation_cfg.full_logit_distillation and self_distillation_cfg.support_mode == "student_topk":
+            if actor_batch is None:
+                raise ValueError(
+                    "support_mode='student_topk' requires the original actor batch when building teacher targets."
+                )
+            student_support = self._compute_self_distillation_student_support(actor_batch)
+
         ref_input = DataProto.from_dict(
             tensors={
                 "responses": teacher_batch.batch["responses"],
@@ -825,6 +857,8 @@ class RayPPOTrainer:
                 "position_ids": teacher_batch.batch["teacher_position_ids"],
             }
         )
+        if student_support is not None:
+            ref_input = ref_input.union(student_support)
         if self_distillation_cfg.full_logit_distillation:
             if self_distillation_cfg.teacher_scoring_mode != "trainer_ref":
                 raise ValueError("trainer-side teacher target computation requires teacher_scoring_mode='trainer_ref'.")
@@ -1937,7 +1971,10 @@ class RayPPOTrainer:
                             if self_distillation_cfg.teacher_scoring_mode == "actor_worker":
                                 batch = batch.union(teacher_batch)
                             else:
-                                teacher_log_prob = self._compute_self_distillation_teacher_log_prob(teacher_batch)
+                                teacher_log_prob = self._compute_self_distillation_teacher_log_prob(
+                                    teacher_batch,
+                                    actor_batch=batch,
+                                )
                                 teacher_targets_for_debug = teacher_log_prob
                                 batch = batch.union(teacher_log_prob)
                             metrics.update(self_distillation_metrics)

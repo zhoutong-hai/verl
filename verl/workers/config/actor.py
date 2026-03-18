@@ -48,6 +48,7 @@ class SelfDistillationConfig(BaseConfig):
     teacher_regularization: str = "ema"
     teacher_update_rate: float = 0.05
     teacher_scoring_mode: str = "trainer_ref"
+    support_mode: str = "teacher_topk"
     distillation_topk: Optional[int] = None
     distillation_add_tail: bool = True
     debug_log_student_support_metrics: bool = False
@@ -91,6 +92,12 @@ class SelfDistillationConfig(BaseConfig):
             raise ValueError(
                 "self_distillation.teacher_scoring_mode must be one of "
                 f"{valid_teacher_scoring_modes}, got {self.teacher_scoring_mode}"
+            )
+        valid_support_modes = ["teacher_topk", "student_topk"]
+        if self.support_mode not in valid_support_modes:
+            raise ValueError(
+                "self_distillation.support_mode must be one of "
+                f"{valid_support_modes}, got {self.support_mode}"
             )
         if self.distillation_topk is not None and self.distillation_topk <= 0:
             raise ValueError(

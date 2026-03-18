@@ -927,10 +927,19 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
         data.meta_info["max_token_len"] = self.config.ref.log_prob_max_token_len_per_gpu
         data.meta_info["use_dynamic_bsz"] = self.config.ref.log_prob_use_dynamic_bsz
         data.meta_info["temperature"] = self.config.rollout.temperature
+        support_mode = getattr(self_distillation_cfg, "support_mode", "teacher_topk")
+        provided_topk_indices = data.batch.get("distillation_topk_indices", None)
+        if support_mode == "student_topk":
+            if provided_topk_indices is None:
+                raise ValueError(
+                    "compute_ref_distillation_targets with support_mode='student_topk' "
+                    "requires distillation_topk_indices in the batch."
+                )
         teacher_log_probs, _, _, teacher_topk_log_probs, teacher_topk_indices = self.ref_policy.compute_log_prob(
             data=data,
             calculate_entropy=False,
-            distill_topk=distill_topk,
+            distill_topk=(None if provided_topk_indices is not None else distill_topk),
+            topk_indices=provided_topk_indices,
             return_topk_indices=True,
         )
         output = DataProto.from_dict(
@@ -946,6 +955,48 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
             log_gpu_memory_usage(
                 "After offload ref params and grad during compute_ref_distillation_targets", logger=logger
             )
+        aggressive_empty_cache(force_sync=True)
+        return output
+
+    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
+    @GPUMemoryLogger(role="compute_actor_distillation_support", logger=logger)
+    @DistProfiler.annotate(color="blue", role="actor_compute_distillation_support")
+    def compute_actor_distillation_support(self, data: DataProto):
+        assert self._is_actor
+        raw_self_distillation_cfg = getattr(self.config.actor, "self_distillation", None)
+        if raw_self_distillation_cfg is None:
+            raise ValueError("compute_actor_distillation_support requires actor.self_distillation config.")
+        self_distillation_cfg = omega_conf_to_dataclass(
+            raw_self_distillation_cfg,
+            dataclass_type=SelfDistillationConfig,
+        )
+        distill_topk = self_distillation_cfg.distillation_topk
+        if not self_distillation_cfg.full_logit_distillation or distill_topk is None:
+            raise ValueError(
+                "compute_actor_distillation_support requires full_logit_distillation with distillation_topk."
+            )
+
+        if self._is_offload_param:
+            load_megatron_model_to_gpu(self.actor_module, load_grad=False)
+            log_gpu_memory_usage("After load actor params during compute_actor_distillation_support", logger=logger)
+
+        data.meta_info["micro_batch_size"] = self.config.rollout.log_prob_micro_batch_size_per_gpu
+        data.meta_info["max_token_len"] = self.config.rollout.log_prob_max_token_len_per_gpu
+        data.meta_info["use_dynamic_bsz"] = self.config.rollout.log_prob_use_dynamic_bsz
+        data.meta_info["temperature"] = self.config.rollout.temperature
+
+        _, _, _, _, student_topk_indices = self.actor.compute_log_prob(
+            data=data,
+            calculate_entropy=False,
+            distill_topk=distill_topk,
+            return_topk_indices=True,
+        )
+        output = DataProto.from_dict(tensors={"distillation_topk_indices": student_topk_indices})
+        output = output.to("cpu")
+
+        if self._is_offload_param:
+            offload_megatron_model_to_cpu(self.actor_module)
+            log_gpu_memory_usage("After offload actor params during compute_actor_distillation_support", logger=logger)
         aggressive_empty_cache(force_sync=True)
         return output
 
