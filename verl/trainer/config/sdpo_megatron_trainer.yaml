@@ -7,6 +7,7 @@ actor_rollout_ref:
     policy_loss:
       loss_mode: sdpo
     self_distillation:
+      support_mode: teacher_topk
       full_logit_distillation: true
       distillation_topk: 100
       alpha: 0.5

@@ -34,6 +34,7 @@ actor_rollout_ref:
       loss_mode: sdpo
     self_distillation:
       teacher_scoring_mode: trainer_ref
+      support_mode: student_topk
       full_logit_distillation: true
       distillation_topk: 100
       alpha: 0.5
