@@ -83,6 +83,10 @@ trainer:
   validation_console_max_chars: 1200
   validation_data_dir: ${oc.env:VALIDATION_DATA_DIR,null}
   validation_dump_generations: 32
+  debug_sdpo_dump_dir: null
+  debug_sdpo_dump_step: 1
+  debug_sdpo_dump_once: true
+  debug_sdpo_dump_max_sequences: 8
   nnodes: ${oc.decode:${oc.env:NNODES,1}}
   n_gpus_per_node: ${oc.decode:${oc.env:N_GPUS_PER_NODE,8}}
   save_freq: -1

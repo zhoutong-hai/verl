@@ -93,6 +93,7 @@ class DataParallelPPOActor(BasePPOActor):
         self.use_ulysses_sp = self.ulysses_sequence_parallel_size > 1
 
         self.use_dynamic_bsz = self.config.get("use_dynamic_bsz", False)
+        self._debug_sdpo_dumped_steps: set[int] = set()
 
         self.use_prefix_grouper = self.config.get("use_prefix_grouper", False)
         if torch.distributed.get_rank() == 0:
@@ -748,6 +749,67 @@ class DataParallelPPOActor(BasePPOActor):
             "actor/kl_loss": 0.0,
         }
         did_update = False
+
+        def maybe_dump_pre_loss(
+            *,
+            model_inputs: dict[str, torch.Tensor],
+            student_log_probs: torch.Tensor,
+            teacher_log_probs: torch.Tensor,
+            student_topk_log_probs: Optional[torch.Tensor],
+            teacher_topk_log_probs: Optional[torch.Tensor],
+            student_topk_indices: Optional[torch.Tensor],
+        ) -> None:
+            debug_dir = data.meta_info.get("debug_sdpo_dump_dir")
+            if not debug_dir:
+                return
+            debug_step = int(data.meta_info.get("debug_sdpo_dump_step", 1))
+            current_step = int(data.meta_info.get("debug_sdpo_global_step", -1))
+            if current_step != debug_step:
+                return
+            if bool(data.meta_info.get("debug_sdpo_dump_once", True)) and current_step in self._debug_sdpo_dumped_steps:
+                return
+            if torch.distributed.is_initialized() and torch.distributed.get_rank() != 0:
+                return
+
+            step_dir = os.path.join(debug_dir, f"step_{current_step:04d}")
+            os.makedirs(step_dir, exist_ok=True)
+            torch.save(
+                {
+                    "meta": {
+                        "global_step": current_step,
+                        "experiment_name": data.meta_info.get("debug_sdpo_experiment_name"),
+                        "actor_strategy": data.meta_info.get("debug_sdpo_actor_strategy"),
+                        "teacher_scoring_mode": "actor_worker",
+                        "support_source": "student_topk",
+                    },
+                    "response_mask": model_inputs["response_mask"].detach().to("cpu"),
+                    "self_distillation_mask": (
+                        model_inputs.get("self_distillation_mask").detach().to("cpu")
+                        if model_inputs.get("self_distillation_mask") is not None
+                        else None
+                    ),
+                    "student_log_probs": student_log_probs.detach().to(torch.float32).to("cpu"),
+                    "teacher_log_probs": teacher_log_probs.detach().to(torch.float32).to("cpu"),
+                    "student_topk_log_probs": (
+                        student_topk_log_probs.detach().to(torch.float32).to("cpu")
+                        if student_topk_log_probs is not None
+                        else None
+                    ),
+                    "teacher_topk_log_probs": (
+                        teacher_topk_log_probs.detach().to(torch.float32).to("cpu")
+                        if teacher_topk_log_probs is not None
+                        else None
+                    ),
+                    "support_topk_indices": (
+                        student_topk_indices.detach().to(torch.int64).to("cpu") if student_topk_indices is not None else None
+                    ),
+                    "responses": model_inputs["responses"].detach().to("cpu"),
+                },
+                os.path.join(step_dir, "actor_pre_loss_rank0.pt"),
+            )
+            print(f"Dumped FSDP SDPO actor tensors to {step_dir}")
+            self._debug_sdpo_dumped_steps.add(current_step)
+
         for _ in range(self.config.ppo_epochs):
             for batch_idx, mini_batch in enumerate(mini_batches):
                 if self.config.use_dynamic_bsz:
@@ -841,6 +903,14 @@ class DataParallelPPOActor(BasePPOActor):
                         teacher_log_prob = teacher_outputs["log_probs"]
                         teacher_all_logps = teacher_outputs.get("all_logps") if return_all_logps else None
                         teacher_topk_logps = teacher_outputs.get("topk_logps") if distill_topk else None
+                        maybe_dump_pre_loss(
+                            model_inputs=model_inputs,
+                            student_log_probs=log_prob,
+                            teacher_log_probs=teacher_log_prob,
+                            student_topk_log_probs=student_topk_logps,
+                            teacher_topk_log_probs=teacher_topk_logps,
+                            student_topk_indices=student_topk_indices,
+                        )
                         pg_loss, pg_metrics = compute_self_distillation_loss(
                             student_log_probs=log_prob,
                             teacher_log_probs=teacher_log_prob,

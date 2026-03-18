@@ -132,6 +132,7 @@ class MegatronPPOActor(BasePPOActor):
         self.tf_config = tf_config
         self.actor_module = actor_module
         self.actor_optimizer: DistributedOptimizer = actor_optimizer
+        self._debug_sdpo_dumped_steps: set[int] = set()
         self.use_torch_profiler = self.config.profiler.get("tool") == "torch"
         if self.use_torch_profiler:
             self.prof = Profiler(
@@ -589,6 +590,58 @@ class MegatronPPOActor(BasePPOActor):
                             student_topk_log_probs = output["topk_log_probs"][
                                 :, -response_length - 1 : -1, :
                             ].contiguous()
+                    debug_dir = meta_info.get("debug_sdpo_dump_dir")
+                    debug_step = int(meta_info.get("debug_sdpo_dump_step", 1))
+                    current_step = int(meta_info.get("debug_sdpo_global_step", -1))
+                    if (
+                        debug_dir
+                        and current_step == debug_step
+                        and not (
+                            bool(meta_info.get("debug_sdpo_dump_once", True))
+                            and current_step in self._debug_sdpo_dumped_steps
+                        )
+                        and (not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0)
+                    ):
+                        step_dir = os.path.join(debug_dir, f"step_{current_step:04d}")
+                        os.makedirs(step_dir, exist_ok=True)
+                        torch.save(
+                            {
+                                "meta": {
+                                    "global_step": current_step,
+                                    "experiment_name": meta_info.get("debug_sdpo_experiment_name"),
+                                    "actor_strategy": meta_info.get("debug_sdpo_actor_strategy"),
+                                    "teacher_scoring_mode": "trainer_ref",
+                                    "support_source": "teacher_topk",
+                                },
+                                "response_mask": response_mask.detach().to("cpu"),
+                                "self_distillation_mask": (
+                                    data.get("self_distillation_mask").detach().to("cpu")
+                                    if data.get("self_distillation_mask") is not None
+                                    else None
+                                ),
+                                "student_log_probs": log_prob.detach().to(torch.float32).to("cpu"),
+                                "teacher_log_probs": data["teacher_log_probs"].detach().to(torch.float32).to("cpu"),
+                                "student_topk_log_probs": (
+                                    student_topk_log_probs.detach().to(torch.float32).to("cpu")
+                                    if student_topk_log_probs is not None
+                                    else None
+                                ),
+                                "teacher_topk_log_probs": (
+                                    data.get("teacher_topk_log_probs").detach().to(torch.float32).to("cpu")
+                                    if data.get("teacher_topk_log_probs") is not None
+                                    else None
+                                ),
+                                "support_topk_indices": (
+                                    data.get("teacher_topk_indices").detach().to(torch.int64).to("cpu")
+                                    if data.get("teacher_topk_indices") is not None
+                                    else None
+                                ),
+                                "responses": data["responses"].detach().to("cpu"),
+                            },
+                            os.path.join(step_dir, "actor_pre_loss_rank0.pt"),
+                        )
+                        print(f"Dumped Megatron SDPO actor tensors to {step_dir}")
+                        self._debug_sdpo_dumped_steps.add(current_step)
                     pg_loss, pg_metrics = compute_self_distillation_loss(
                         student_log_probs=log_prob,
                         teacher_log_probs=data["teacher_log_probs"],

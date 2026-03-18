@@ -341,6 +341,7 @@ class RayPPOTrainer:
             project_name=self.config.trainer.project_name,
             experiment_name=self.config.trainer.experiment_name,
         )
+        self._debug_sdpo_dumped_steps: set[int] = set()
 
         # if ref_in_actor is True, the reference policy will be actor without lora applied
         self.ref_in_actor = (
@@ -476,6 +477,98 @@ class RayPPOTrainer:
             f.write("\n".join(lines) + "\n")
 
         print(f"Dumped generations to {filename}")
+
+    def _maybe_dump_sdpo_debug_batch(
+        self,
+        batch: DataProto,
+        teacher_batch: Optional[DataProto] = None,
+        teacher_targets: Optional[DataProto] = None,
+    ) -> None:
+        debug_dir = self.config.trainer.get("debug_sdpo_dump_dir", None)
+        if not debug_dir:
+            return
+
+        debug_step = int(self.config.trainer.get("debug_sdpo_dump_step", 1))
+        if self.global_steps != debug_step:
+            return
+
+        debug_once = bool(self.config.trainer.get("debug_sdpo_dump_once", True))
+        if debug_once and self.global_steps in self._debug_sdpo_dumped_steps:
+            return
+
+        max_sequences = int(self.config.trainer.get("debug_sdpo_dump_max_sequences", 8))
+        step_dir = os.path.join(debug_dir, f"step_{self.global_steps:04d}")
+        os.makedirs(step_dir, exist_ok=True)
+
+        def _slice_dataproto(data: Optional[DataProto], batch_keys: list[str], filename: str) -> Optional[dict[str, Any]]:
+            if data is None:
+                return None
+            existing_batch_keys = [key for key in batch_keys if data.batch is not None and key in data.batch.keys()]
+            sliced = data.select(batch_keys=existing_batch_keys, non_tensor_batch_keys=[]).to("cpu")
+            if max_sequences > 0:
+                sliced = sliced[:max_sequences]
+            filepath = os.path.join(step_dir, filename)
+            sliced.save_to_disk(filepath)
+            return {
+                "path": filepath,
+                "num_rows": len(sliced),
+                "batch_keys": existing_batch_keys,
+                "shapes": {
+                    key: list(sliced.batch[key].shape) for key in existing_batch_keys if sliced.batch is not None
+                },
+            }
+
+        common_batch_keys = [
+            "input_ids",
+            "attention_mask",
+            "position_ids",
+            "responses",
+            "response_mask",
+            "old_log_probs",
+            "advantages",
+            "token_level_scores",
+            "token_level_rewards",
+            "self_distillation_mask",
+            "teacher_input_ids",
+            "teacher_attention_mask",
+            "teacher_position_ids",
+            "teacher_log_probs",
+            "teacher_topk_log_probs",
+            "teacher_topk_indices",
+            "rollout_is_weights",
+        ]
+        teacher_batch_keys = [
+            "responses",
+            "response_mask",
+            "self_distillation_mask",
+            "teacher_input_ids",
+            "teacher_attention_mask",
+            "teacher_position_ids",
+        ]
+        teacher_target_keys = [
+            "teacher_log_probs",
+            "teacher_topk_log_probs",
+            "teacher_topk_indices",
+            "self_distillation_mask",
+        ]
+
+        summary = {
+            "global_step": self.global_steps,
+            "experiment_name": self.config.trainer.experiment_name,
+            "actor_strategy": OmegaConf.select(self.config, "actor_rollout_ref.actor.strategy"),
+            "teacher_scoring_mode": OmegaConf.select(
+                self.config, "actor_rollout_ref.actor.self_distillation.teacher_scoring_mode"
+            ),
+            "dump_max_sequences": max_sequences,
+            "trainer_batch": _slice_dataproto(batch, common_batch_keys, "trainer_batch.pkl"),
+            "teacher_batch": _slice_dataproto(teacher_batch, teacher_batch_keys, "teacher_batch.pkl"),
+            "teacher_targets": _slice_dataproto(teacher_targets, teacher_target_keys, "teacher_targets.pkl"),
+        }
+        summary_path = os.path.join(step_dir, "trainer_summary.json")
+        with open(summary_path, "w") as f:
+            json.dump(summary, f, indent=2)
+        print(f"Dumped SDPO trainer batch to {step_dir}")
+        self._debug_sdpo_dumped_steps.add(self.global_steps)
 
     def _maybe_print_val_generations(self, inputs, outputs, gts, scores):
         """Print a small number of validation samples inline for quick debugging."""
@@ -1808,6 +1901,8 @@ class RayPPOTrainer:
                             values = self._compute_values(batch)
                             batch = batch.union(values)
 
+                    teacher_batch_for_debug = None
+                    teacher_targets_for_debug = None
                     with marked_timer("adv", timing_raw, color="brown"):
                         # we combine with rule-based rm
                         reward_extra_infos_dict: dict[str, list]
@@ -1820,6 +1915,7 @@ class RayPPOTrainer:
                         )
                         if self_distillation_data is not None:
                             teacher_batch, self_distillation_metrics = self_distillation_data
+                            teacher_batch_for_debug = teacher_batch
                             raw_self_distillation_cfg = self.config.actor_rollout_ref.actor.get("self_distillation")
                             self_distillation_cfg = omega_conf_to_dataclass(
                                 raw_self_distillation_cfg,
@@ -1829,6 +1925,7 @@ class RayPPOTrainer:
                                 batch = batch.union(teacher_batch)
                             else:
                                 teacher_log_prob = self._compute_self_distillation_teacher_log_prob(teacher_batch)
+                                teacher_targets_for_debug = teacher_log_prob
                                 batch = batch.union(teacher_log_prob)
                             metrics.update(self_distillation_metrics)
 
@@ -1883,6 +1980,25 @@ class RayPPOTrainer:
 
                     # implement critic warmup
                     if self.config.trainer.critic_warmup <= self.global_steps:
+                        debug_dump_dir = self.config.trainer.get("debug_sdpo_dump_dir", None)
+                        if debug_dump_dir:
+                            batch.meta_info["debug_sdpo_dump_dir"] = debug_dump_dir
+                            batch.meta_info["debug_sdpo_dump_step"] = int(
+                                self.config.trainer.get("debug_sdpo_dump_step", 1)
+                            )
+                            batch.meta_info["debug_sdpo_dump_once"] = bool(
+                                self.config.trainer.get("debug_sdpo_dump_once", True)
+                            )
+                            batch.meta_info["debug_sdpo_global_step"] = self.global_steps
+                            batch.meta_info["debug_sdpo_experiment_name"] = self.config.trainer.experiment_name
+                            batch.meta_info["debug_sdpo_actor_strategy"] = OmegaConf.select(
+                                self.config, "actor_rollout_ref.actor.strategy"
+                            )
+                            self._maybe_dump_sdpo_debug_batch(
+                                batch=batch,
+                                teacher_batch=teacher_batch_for_debug,
+                                teacher_targets=teacher_targets_for_debug,
+                            )
                         # update actor
                         with marked_timer("update_actor", timing_raw, color="red"):
                             actor_output = self._update_actor(batch)
