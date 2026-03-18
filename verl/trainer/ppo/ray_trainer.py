@@ -962,8 +962,14 @@ class RayPPOTrainer:
         apply_kwargs = dict(**(self.config.data.get("apply_chat_template_kwargs", {}) or {}))
         truncation_side = self_distillation_cfg.get("reprompt_truncation", None)
         previous_truncation_side = getattr(self.tokenizer, "truncation_side", None)
+        previous_padding_side = getattr(self.tokenizer, "padding_side", None)
         if truncation_side in {"left", "right"}:
             self.tokenizer.truncation_side = truncation_side
+        # Left-pad teacher prompts so the token immediately before the response window is always a
+        # real prompt token instead of right-padding. This keeps the shifted Megatron label mask
+        # aligned with response_token_count when teacher scoring consumes response-aligned supports.
+        if previous_padding_side is not None:
+            self.tokenizer.padding_side = "left"
         try:
             teacher_prompt = self.tokenizer.apply_chat_template(
                 messages,
@@ -979,6 +985,8 @@ class RayPPOTrainer:
         finally:
             if truncation_side in {"left", "right"} and previous_truncation_side is not None:
                 self.tokenizer.truncation_side = previous_truncation_side
+            if previous_padding_side is not None:
+                self.tokenizer.padding_side = previous_padding_side
 
         teacher_input_ids = torch.cat([teacher_prompt["input_ids"].to(device), responses], dim=1)
         teacher_attention_mask = torch.cat(
