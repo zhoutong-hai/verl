@@ -50,6 +50,7 @@ class SelfDistillationConfig(BaseConfig):
     teacher_scoring_mode: str = "trainer_ref"
     distillation_topk: Optional[int] = None
     distillation_add_tail: bool = True
+    debug_log_student_support_metrics: bool = False
     max_reprompt_len: int = 10240
     reprompt_truncation: str = "right"
     dont_reprompt_on_self_success: bool = False
