@@ -1,0 +1,172 @@
+# GLM-4.5-Air Physics Section 3 Experiment Log
+
+## Goal
+
+Extend the current Physics Section 3 SDPO and GRPO experiment setup to `GLM-4.5-Air`, while preserving the same `verl`-native benchmark structure used for the Qwen Physics runs:
+
+- SciKnowEval `physics`
+- Megatron training path
+- validation sample printing and dumps
+- W&B tracking
+- comparable SDPO and GRPO launcher variants
+
+## Why this model is next
+
+- It is the next model of interest after the Qwen Physics bring-up.
+- It likely requires a real multi-node Megatron setup rather than the smaller-model single-node path.
+- The shared model path already exists on cluster storage:
+  - `/hai/shared/pretrained_models/GLM-4.5-Air`
+
+## Initial plan
+
+1. Reuse the current Physics benchmark family instead of switching to a different dataset or training recipe.
+2. Reuse the current `verl` Megatron experiment structure rather than the ms-swift setup.
+3. Add a GLM-Air-specific Physics launcher that supports:
+   - `VARIANT=sdpo_megatron`
+   - `VARIANT=grpo_megatron`
+4. Start with the stable `teacher_topk` SDPO path for bring-up.
+5. Keep the current logging pattern:
+   - inline validation samples
+   - capped validation JSONL dumps
+   - W&B tracking
+
+## Relevant references
+
+- Shared model path:
+  - `/hai/shared/pretrained_models/GLM-4.5-Air`
+- Current working Physics Megatron reference:
+  - [QWEN3_8B_PHYSICS_SECTION3_EXPERIMENT_LOG.md](/Users/zhoutong/code/verl/sdpo-megatron/experiment-logs/QWEN3_8B_PHYSICS_SECTION3_EXPERIMENT_LOG.md)
+- Closest `verl` GLM-Air model reference:
+  - [test_dapo_glm_air_megatron.sh](/Users/zhoutong/code/verl/recipe/dapo/test_dapo_glm_air_megatron.sh)
+- New GLM-Air SkyPilot task:
+  - [verl-glm45-air-section3-physics.yaml](/Users/zhoutong/code/verl/examples/skypilot/verl-glm45-air-section3-physics.yaml)
+
+## Bring-up findings before launch
+
+### [Resolved] The shared model path is real and includes tokenizer/chat-template assets
+
+Verified on an existing cluster node:
+
+- `/hai/shared/pretrained_models/GLM-4.5-Air/config.json`
+- `/hai/shared/pretrained_models/GLM-4.5-Air/tokenizer.json`
+- `/hai/shared/pretrained_models/GLM-4.5-Air/tokenizer_config.json`
+- `/hai/shared/pretrained_models/GLM-4.5-Air/chat_template.jinja`
+
+The tokenizer loads successfully and already exposes a chat template.
+
+### [Resolved] The current vLLM image appears to support `glm4_moe`
+
+Inspected the installed vLLM package on the cluster node and found:
+
+- `vllm/model_executor/models/glm4_moe.py`
+
+So this should not hit the OLMo-style unsupported-model fallback issue.
+
+### [Resolved] The current Megatron-Bridge path recognizes GLM-4.5-Air
+
+Verified on the cluster node:
+
+- `AutoBridge.from_hf_pretrained('/hai/shared/pretrained_models/GLM-4.5-Air', trust_remote_code=True)`
+- `bridge.to_megatron_provider(load_weights=False)`
+
+This succeeded and returned:
+
+- `GLMMoEModelProvider`
+
+That means the main worker path used by the current Megatron experiments should be viable for this model.
+
+### [Noted] The local fallback registry is still incomplete for `Glm4MoeForCausalLM`
+
+The repo-local `hf_to_mcore_config(...)` fallback path still fails with:
+
+- `KeyError <SupportedModel.GLM4_MOE: 'Glm4MoeForCausalLM'>`
+
+because the local Megatron registry includes forward-function entries for `GLM4_MOE` but not the corresponding config-converter / initializer registrations.
+
+Current interpretation:
+
+- this is not an immediate blocker for the planned bring-up path because the current Megatron experiments use Megatron-Bridge with `vanilla_mbridge=false`
+- but it is still a cleanup item if we want the local non-Bridge fallback path to support GLM-Air cleanly
+
+## New experiment artifacts
+
+### Launcher file
+
+- [verl-glm45-air-section3-physics.yaml](/Users/zhoutong/code/verl/examples/skypilot/verl-glm45-air-section3-physics.yaml)
+
+### Config strategy
+
+- The multi-node launcher now follows the single-file SkyPilot pattern.
+- Model-specific GLM-Air overrides live directly in the SkyPilot `run:` block.
+- The task launches `python3 -m verl.trainer.main_ppo` against the shared base configs:
+  - `sdpo_megatron_trainer.yaml`
+  - `ppo_megatron_trainer.yaml`
+- The older wrapper shell script and GLM-Air-specific trainer YAMLs were removed as unused once the inline SkyPilot path became the canonical launcher.
+
+## Current launch shape
+
+- benchmark: SciKnowEval `physics`
+- model: `GLM-4.5-Air`
+- training path: Megatron
+- expected cluster shape: `4 x H200:8`
+- initial SDPO mode: `teacher_topk`
+- GRPO baseline variant included in the same launcher path
+
+Initial Megatron partition defaults in the new launcher:
+
+- actor/ref TP = `2`
+- actor/ref PP = `2`
+- actor/ref CP = `2`
+- actor/ref EP = `4`
+- actor/ref ETP = `1`
+- rollout TP = `8`
+
+These are initial bring-up defaults derived from the closest GLM-Air Megatron reference in this repo and should be treated as tunable if the first run exposes memory or throughput issues.
+
+## Commands
+
+### SDPO
+
+```bash
+source /Users/zhoutong/code/skypilot-infra/.venv/bin/activate
+export WANDB_API_KEY='***'
+sky launch -c verl-glm45-air-physics \
+  /Users/zhoutong/code/verl/examples/skypilot/verl-glm45-air-section3-physics.yaml \
+  --env VARIANT=sdpo_megatron \
+  --secret WANDB_API_KEY -y
+```
+
+### GRPO
+
+```bash
+source /Users/zhoutong/code/skypilot-infra/.venv/bin/activate
+export WANDB_API_KEY='***'
+sky launch -c verl-glm45-air-physics \
+  /Users/zhoutong/code/verl/examples/skypilot/verl-glm45-air-section3-physics.yaml \
+  --env VARIANT=grpo_megatron \
+  --secret WANDB_API_KEY -y
+```
+
+## Monitoring metrics
+
+- `val-core/sciknoweval/acc/mean@16`
+- `val-core/sciknoweval/acc/best@16/mean`
+- `val-core/sciknoweval/acc/maj@16/mean`
+- `self_distillation/success_group_fraction`
+- `self_distillation/reprompt_sample_fraction`
+- `self_distillation/empty_target_batch`
+- `critic/score/mean`
+- `response_length/mean`
+- `response_length/clip_ratio`
+- inline validation samples in `run.log`
+- capped validation dump files under `/hai/zhoutong/section3_physics_assets/validation_generations/`
+
+## Current status
+
+- The GLM-Air Physics experiment scaffolding is now prepared in `verl`.
+- The main pre-launch risks have been checked:
+  - model path exists
+  - tokenizer/chat template exists
+  - Megatron-Bridge recognizes the model
+  - vLLM appears to support `glm4_moe`
+- The next step is the first real 4-node bring-up launch.
