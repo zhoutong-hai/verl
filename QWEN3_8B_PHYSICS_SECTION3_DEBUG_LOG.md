@@ -915,3 +915,38 @@ sky launch -c verl-olmo3-physics \
 - Remaining caveat:
   - this still does **not** prove full long-run parity with FSDP
   - the next fair check is a longer corrected Megatron run and comparison of the best `1h` and `5h` windows against the healthy FSDP Physics baseline
+
+### [Ongoing] Matched-step comparison across live Qwen Physics runs
+
+- To avoid mixing `mean@16`, `best@16`, and `maj@16`, the cleanest comparison is:
+  - `val-core/sciknoweval/acc/mean@16`
+  - aligned at the same validation cadence (`test_freq = 5`)
+- Current live runs:
+  - Megatron SDPO `student_topk` on `verl-olmo3-physics`
+  - FSDP SDPO repro on `verl-qwen3-physics-fsdp-repro`
+  - FSDP GRPO repro on `verl-qwen3-physics-grpo-repro`
+
+| Step | FSDP SDPO repro | Megatron SDPO `student_topk` | FSDP GRPO repro |
+| --- | ---: | ---: | ---: |
+| 5 | `0.565625` | `0.5640625` | `0.58359375` |
+| 10 | `0.62890625` | `0.61875` | `0.61640625` |
+| 20 | `0.640625` | `0.6515625` | `0.603125` |
+| 40 | `0.6875` | `0.6796875` | `0.509375` |
+| 60 | `0.70234375` | `0.69296875` | `0.6015625` |
+| 80 | `0.74609375` | `0.7` | `0.61953125` |
+| 90 | `0.70859375` | `0.70234375` | `0.515625` |
+
+- Readout from the shared window so far:
+  - the two SDPO runs are now in the same regime and track each other reasonably closely
+  - FSDP SDPO is still slightly stronger overall in this matched-step view, with the clearest gap around step `80`
+  - GRPO is clearly behind both SDPO runs and degrades later in the shared window
+
+- Latest visible `val-core/sciknoweval/acc/mean@16` values beyond the shared window:
+  - Megatron SDPO `student_topk`: `0.72734375`
+  - FSDP SDPO repro: `0.7125`
+  - FSDP GRPO repro: `0.515625`
+
+- Current interpretation:
+  - the catastrophic Megatron failure mode is resolved
+  - the remaining Megatron-vs-FSDP question is now about quality parity, not correctness collapse
+  - both SDPO variants are materially stronger than the current GRPO repro on this Qwen Physics setup
