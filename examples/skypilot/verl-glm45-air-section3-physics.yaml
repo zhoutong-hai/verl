@@ -186,7 +186,7 @@ run: |
       config_name='sdpo_megatron_trainer.yaml'
       policy_args=(
         actor_rollout_ref.actor.policy_loss.loss_mode=sdpo
-        actor_rollout_ref.actor.self_distillation.teacher_scoring_mode=trainer_ref
+        +actor_rollout_ref.actor.self_distillation.teacher_scoring_mode=trainer_ref
         actor_rollout_ref.actor.self_distillation.support_mode=teacher_topk
         actor_rollout_ref.actor.self_distillation.full_logit_distillation=true
         actor_rollout_ref.actor.self_distillation.distillation_topk=100
