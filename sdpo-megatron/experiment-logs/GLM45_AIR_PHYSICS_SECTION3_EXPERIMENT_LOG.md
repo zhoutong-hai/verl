@@ -727,3 +727,47 @@ Next step:
 
 - relaunch immediately on the same reserved 4-node cluster with the shorter sequence budget
 - keep monitoring until the run gets through multiple training steps or exposes the next concrete blocker
+
+### [Applied] Use sharded teacher-topk logits in Megatron actor update
+
+The shorter sequence budget improved the bring-up but did not fully solve the actor-update OOM:
+
+- step 1 completed successfully again
+- step 2 still failed with repeated OOMs allocating roughly `6.5 GiB`
+- stack sites remained inside the Megatron SDPO full-logit path:
+  - `verl/workers/actor/megatron_actor.py::logits_processor`
+  - `logits.clone()`
+  - `tensor_parallel.gather_from_tensor_model_parallel_region(logits)`
+
+Interpretation:
+
+- This confirmed that sequence-budget reduction alone is not the full answer.
+- In the current GLM-Air SDPO run we already have cached `teacher_topk_indices`, but the actor update was still:
+  - cloning raw shard logits
+  - gathering the entire vocab logits across TP
+  - then indexing back into the same teacher support
+- That is unnecessarily expensive for large models and exactly the wrong scaling point for GLM-Air.
+
+Applied fix:
+
+- add a low-memory Megatron actor path for the common `teacher_topk` case
+- when cached `teacher_topk_indices` are present and we are not requesting extra debug student-support metrics:
+  - compute distributed `logsumexp` directly from shard logits
+  - gather only the requested global token logits from shards
+  - compute `topk_log_probs`, `student_mass_on_teacher_support`, `student_top1_in_teacher_support`,
+    `student_top1_matches_teacher_top1`, and `selected_logprob_from_full_abs_diff` from those sharded values
+- skip the old:
+  - `logits.clone()` preservation path for top-k
+  - `gather_from_tensor_model_parallel_region(logits)` full-vocab materialization
+
+Why this is the right fix:
+
+- It addresses the actual GLM-Air scaling bottleneck instead of only shrinking the workload.
+- It keeps the corrected Megatron SDPO semantics for the cached `teacher_topk` path.
+- It is also the right architectural direction for larger models, where full-vocab materialization in actor update is
+  not viable.
+
+Next step:
+
+- relaunch immediately on the same reserved 4-node cluster with the sharded teacher-topk actor path
+- keep monitoring until the run survives past the previous step-2 failure point or exposes the next blocker

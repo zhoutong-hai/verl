@@ -987,10 +987,152 @@ class MegatronPPOActor(BasePPOActor):
                         rhs_ids = flat_rhs + row_offsets
                         return torch.isin(lhs_ids, rhs_ids).reshape_as(lhs_indices)
 
+                    tp_group = mpu.get_tensor_model_parallel_group()
+                    tp_rank = mpu.get_tensor_model_parallel_rank()
+                    tp_world_size = mpu.get_tensor_model_parallel_world_size()
+                    local_vocab_size = logits.size(-1)
+                    vocab_start = tp_rank * local_vocab_size
+                    vocab_end = vocab_start + local_vocab_size
+
+                    def distributed_logsumexp_from_shards(local_logits: torch.Tensor) -> torch.Tensor:
+                        shard_max = local_logits.max(dim=-1, keepdim=True).values
+                        global_max = shard_max.clone()
+                        torch.distributed.all_reduce(
+                            global_max, op=torch.distributed.ReduceOp.MAX, group=tp_group
+                        )
+                        shard_exp_sum = torch.exp(local_logits - global_max).sum(dim=-1, keepdim=True)
+                        global_exp_sum = shard_exp_sum.clone()
+                        torch.distributed.all_reduce(
+                            global_exp_sum, op=torch.distributed.ReduceOp.SUM, group=tp_group
+                        )
+                        return global_max + torch.log(global_exp_sum)
+
+                    def gather_global_token_logits_from_shards(
+                        local_logits: torch.Tensor, global_indices: torch.Tensor
+                    ) -> torch.Tensor:
+                        global_indices = global_indices.to(torch.int64)
+                        local_mask = (global_indices >= vocab_start) & (global_indices < vocab_end)
+                        local_indices = (global_indices - vocab_start).masked_fill(~local_mask, 0)
+                        local_values = torch.gather(local_logits, dim=-1, index=local_indices)
+                        local_values = local_values * local_mask.to(local_logits.dtype)
+                        torch.distributed.all_reduce(
+                            local_values, op=torch.distributed.ReduceOp.SUM, group=tp_group
+                        )
+                        return local_values
+
+                    def distributed_top1_index_from_shards(local_logits: torch.Tensor) -> torch.Tensor:
+                        local_top1_vals, local_top1_indices = local_logits.max(dim=-1)
+                        local_top1_indices = local_top1_indices.to(torch.int64) + vocab_start
+                        flat_vals = local_top1_vals.contiguous().reshape(-1)
+                        flat_indices = local_top1_indices.contiguous().reshape(-1)
+                        gathered_vals = [torch.empty_like(flat_vals) for _ in range(tp_world_size)]
+                        gathered_indices = [torch.empty_like(flat_indices) for _ in range(tp_world_size)]
+                        torch.distributed.all_gather(gathered_vals, flat_vals, group=tp_group)
+                        torch.distributed.all_gather(gathered_indices, flat_indices, group=tp_group)
+                        stacked_vals = torch.stack(gathered_vals, dim=0)
+                        stacked_indices = torch.stack(gathered_indices, dim=0)
+                        winning_rank = stacked_vals.argmax(dim=0, keepdim=True)
+                        winning_indices = torch.gather(stacked_indices, dim=0, index=winning_rank).squeeze(0)
+                        return winning_indices.view_as(local_top1_vals)
+
                     assert logits.shape[:2] == label.shape[:2]
                     assert label.shape == label_mask.shape
                     logits.div_(temperature)
                     ret = {}
+                    use_low_memory_teacher_topk = (
+                        teacher_topk_indices is not None
+                        and not log_student_support_metrics
+                        and not return_topk_indices
+                    )
+                    topk_metrics = None
+                    if should_compute_topk and use_low_memory_teacher_topk:
+                        logsumexp = distributed_logsumexp_from_shards(logits)
+                        selected_logits_from_full = gather_global_token_logits_from_shards(
+                            logits, label.unsqueeze(-1)
+                        ).squeeze(-1)
+                        selected_log_probs_from_full = selected_logits_from_full - logsumexp.squeeze(-1)
+                        selected_log_probs_from_full = selected_log_probs_from_full.masked_fill(~label_mask, 0.0)
+                        topk_metrics = {
+                            "selected_log_probs_from_full_abs_diff": selected_log_probs_from_full,
+                        }
+                        if teacher_topk_indices.shape[1] == logits.shape[1]:
+                            current_topk_indices = teacher_topk_indices.to(logits.device)
+                            topk_logits = gather_global_token_logits_from_shards(logits, current_topk_indices)
+                            student_top1 = distributed_top1_index_from_shards(logits)
+                            topk_metrics.update(
+                                {
+                                    "topk_log_probs": topk_logits - logsumexp,
+                                    "student_mass_on_teacher_support": torch.exp(
+                                        torch.logsumexp(topk_logits, dim=-1) - logsumexp.squeeze(-1)
+                                    ),
+                                    "student_top1_in_teacher_support": (
+                                        (current_topk_indices == student_top1.unsqueeze(-1))
+                                        .any(dim=-1)
+                                        .to(topk_logits.dtype)
+                                    ),
+                                    "student_top1_matches_teacher_top1": (
+                                        (student_top1 == current_topk_indices[..., 0]).to(topk_logits.dtype)
+                                    ),
+                                }
+                            )
+                        else:
+                            current_response_mask = response_mask.to(device=logits.device)
+                            active_label_mask = label_mask.to(device=logits.device)
+                            active_token_count = int(active_label_mask.sum().item())
+                            response_token_count = int(current_response_mask.sum().item())
+                            if active_token_count != response_token_count:
+                                raise ValueError(
+                                    "Packed Megatron logits and response_mask disagree on active response tokens: "
+                                    f"{active_token_count} vs {response_token_count}."
+                                )
+                            current_topk_indices = teacher_topk_indices.to(logits.device)
+                            active_teacher_topk_indices = current_topk_indices[current_response_mask]
+                            active_local_logits = logits[active_label_mask]
+                            active_logsumexp = distributed_logsumexp_from_shards(active_local_logits)
+                            active_topk_logits = gather_global_token_logits_from_shards(
+                                active_local_logits, active_teacher_topk_indices
+                            )
+                            active_student_top1 = distributed_top1_index_from_shards(active_local_logits)
+                            packed_topk_log_probs = torch.zeros(
+                                (*active_label_mask.shape, current_topk_indices.size(-1)),
+                                dtype=active_topk_logits.dtype,
+                                device=logits.device,
+                            )
+                            packed_topk_log_probs[active_label_mask] = active_topk_logits - active_logsumexp
+                            packed_student_mass_on_teacher_support = torch.zeros(
+                                active_label_mask.shape,
+                                dtype=active_topk_logits.dtype,
+                                device=logits.device,
+                            )
+                            packed_student_mass_on_teacher_support[active_label_mask] = torch.exp(
+                                torch.logsumexp(active_topk_logits, dim=-1) - active_logsumexp.squeeze(-1)
+                            )
+                            packed_student_top1_in_teacher_support = torch.zeros(
+                                active_label_mask.shape,
+                                dtype=active_topk_logits.dtype,
+                                device=logits.device,
+                            )
+                            packed_student_top1_in_teacher_support[active_label_mask] = (
+                                (active_teacher_topk_indices == active_student_top1.unsqueeze(-1))
+                                .any(dim=-1)
+                                .to(active_topk_logits.dtype)
+                            )
+                            packed_student_top1_matches_teacher_top1 = torch.zeros(
+                                active_label_mask.shape,
+                                dtype=active_topk_logits.dtype,
+                                device=logits.device,
+                            )
+                            packed_student_top1_matches_teacher_top1[active_label_mask] = (
+                                (active_student_top1 == active_teacher_topk_indices[:, 0]).to(active_topk_logits.dtype)
+                            )
+                            topk_metrics.update(
+                                {
+                                    "topk_log_probs": packed_topk_log_probs,
+                                    "student_mass_on_teacher_support": packed_student_mass_on_teacher_support,
+                                    "student_top1_in_teacher_support": packed_student_top1_in_teacher_support,
+                                    "student_top1_matches_teacher_top1": packed_student_top1_matches_teacher_top1,
+                                }
+                            )
                     if calculate_entropy:
                         logits_bak = logits.clone()
                         # # disable the hint until the fused_kernel is optimized for triton>=3.3
@@ -1006,12 +1148,18 @@ class MegatronPPOActor(BasePPOActor):
                     # Megatron's vocab_parallel_cross_entropy mutates its input logits in-place
                     # (subtract max, exponentiate, normalize). Preserve raw shard logits when we
                     # also need global top-k/full-logit SDPO targets from the same forward pass.
-                    if should_compute_topk and logits_bak.data_ptr() == logits.data_ptr():
+                    if should_compute_topk and not use_low_memory_teacher_topk and logits_bak.data_ptr() == logits.data_ptr():
                         logits_bak = logits.clone()
                     log_probs = vocab_parallel_log_probs_from_logits(logits_bak, label)
                     log_probs = log_probs.masked_fill(~label_mask, 0.0)
                     ret["log_probs"] = log_probs
                     if should_compute_topk:
+                        if use_low_memory_teacher_topk:
+                            topk_metrics["selected_log_probs_from_full_abs_diff"] = (
+                                topk_metrics["selected_log_probs_from_full_abs_diff"] - log_probs
+                            ).abs()
+                            ret.update(topk_metrics)
+                            return ret
                         # SDPO top-k support must be global over the vocabulary, not local to a TP shard.
                         full_logits = tensor_parallel.gather_from_tensor_model_parallel_region(logits)
                         selected_logits_from_full = torch.gather(
