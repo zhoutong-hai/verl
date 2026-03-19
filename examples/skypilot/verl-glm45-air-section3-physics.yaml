@@ -8,7 +8,6 @@ envs:
   VARIANT: sdpo_megatron
   WANDB_PROJECT: main_models_zhoutong
   WANDB_ENTITY: hippocraticai
-  WANDB_EXP_NAME: <placeholder>
   TRAIN_TP_SIZE: "2"
   TRAIN_PP_SIZE: "2"
   TRAIN_CP_SIZE: "1"
@@ -240,15 +239,10 @@ run: |
     fi
 
     RUN_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-    if [ -z "${WANDB_EXP_NAME:-}" ] || [ "$WANDB_EXP_NAME" = "<placeholder>" ]; then
-      EXPERIMENT_NAME="${RUN_NAME_PREFIX}_${VARIANT}_${RUN_TIMESTAMP}"
-    else
-      EXPERIMENT_NAME="$WANDB_EXP_NAME"
-    fi
+    EXPERIMENT_NAME="${RUN_NAME_PREFIX}_${VARIANT}_${RUN_TIMESTAMP}"
     VALIDATION_DATA_DIR="/hai/zhoutong/section3_physics_assets/validation_generations/${EXPERIMENT_NAME}"
     mkdir -p "$VALIDATION_DATA_DIR"
 
-    export EXP_NAME="$EXPERIMENT_NAME"
     export MODEL_PATH
     export PHYSICS_DATA_DIR
     export N_GPUS_PER_NODE="${SKYPILOT_NUM_GPUS_PER_NODE:-$N_GPUS_PER_NODE}"

@@ -899,3 +899,20 @@ Next step:
 
 - relaunch immediately on the same reserved cluster without the expandable-segments allocator override
 - continue monitoring for the next failure boundary or a healthy step-10+ training state
+
+### [Applied] Clean up W&B launch semantics
+
+To make future relaunches simpler and easier to trace:
+
+- remove the `WANDB_EXP_NAME` override path from the single SkyPilot YAML
+- always derive `trainer.experiment_name` from:
+  - `${RUN_NAME_PREFIX}_${VARIANT}_${timestamp}`
+- keep W&B enablement driven only by whether `WANDB_API_KEY` is passed into the launch
+
+Operational rule for the next relaunch:
+
+- launch with `--secret WANDB_API_KEY` so the job logs to W&B
+- do not thread a separate experiment-name override through the YAML anymore
+
+This keeps the launcher closer to the Arrakis-style single-YAML pattern and avoids one-off naming state that is
+not needed for the GLM-Air bring-up loop.
