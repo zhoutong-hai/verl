@@ -930,6 +930,15 @@ class MegatronPPOActor(BasePPOActor):
 
             from verl.models.mcore import get_mcore_forward_fn, get_mcore_forward_fused_fn
 
+            disable_mtp_for_rl = bool(getattr(unwrapped_model, "mtp_process", False))
+            if disable_mtp_for_rl and not getattr(self, "_warned_disabled_mtp_for_rl", False):
+                logger.warning(
+                    "Temporarily disabling Megatron MTP inside actor/ref forward passes. "
+                    "The RL path needs next-token logits only, and GLM-style MTP currently breaks "
+                    "compute_log_prob/update tensor shapes in verl Megatron."
+                )
+                self._warned_disabled_mtp_for_rl = True
+
             if self.use_fused_kernels:
                 if "teacher_topk_indices" in batch:
                     raise NotImplementedError(
@@ -939,16 +948,22 @@ class MegatronPPOActor(BasePPOActor):
                 if return_schedule_plan:
                     forward_fn = gptmodel_forward_1f1b_overlap
                 # return dict of [logits, entropy]
-                output = forward_fn(
-                    model=model,
-                    input_ids=input_ids,
-                    position_ids=position_ids,
-                    attention_mask=attention_mask,
-                    labels=label,
-                    labels_mask=label_mask,
-                    temperature=temperature,
-                    multi_modal_inputs=multi_modal_inputs,
-                )
+                if disable_mtp_for_rl:
+                    unwrapped_model.mtp_process = False
+                try:
+                    output = forward_fn(
+                        model=model,
+                        input_ids=input_ids,
+                        position_ids=position_ids,
+                        attention_mask=attention_mask,
+                        labels=label,
+                        labels_mask=label_mask,
+                        temperature=temperature,
+                        multi_modal_inputs=multi_modal_inputs,
+                    )
+                finally:
+                    if disable_mtp_for_rl:
+                        unwrapped_model.mtp_process = True
             else:
                 forward_fn = get_mcore_forward_fn(self.hf_config)
 
@@ -1207,16 +1222,22 @@ class MegatronPPOActor(BasePPOActor):
                     return ret
 
                 logits_processor_args = {"label": label, "label_mask": label_mask}
-                output = forward_fn(
-                    model=model,
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    position_ids=position_ids,
-                    multi_modal_inputs=multi_modal_inputs,
-                    logits_processor=logits_processor,
-                    logits_processor_args=logits_processor_args,
-                    data_format="thd" if self.config.megatron.use_remove_padding else "bshd",
-                )
+                if disable_mtp_for_rl:
+                    unwrapped_model.mtp_process = False
+                try:
+                    output = forward_fn(
+                        model=model,
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        position_ids=position_ids,
+                        multi_modal_inputs=multi_modal_inputs,
+                        logits_processor=logits_processor,
+                        logits_processor_args=logits_processor_args,
+                        data_format="thd" if self.config.megatron.use_remove_padding else "bshd",
+                    )
+                finally:
+                    if disable_mtp_for_rl:
+                        unwrapped_model.mtp_process = True
 
             if forward_only:
                 meta_info = None

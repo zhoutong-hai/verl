@@ -511,3 +511,39 @@ Next step:
 
 - relaunch immediately on the same reserved 4-node cluster with `TRAIN_CP_SIZE=1`
 - continue monitoring until the run reaches real training steps or exposes the next concrete blocker
+
+### [Resolved Locally] GLM-Air MTP must be disabled inside actor/ref RL forwards
+
+After the `CP=1` fix, the run got past distributed bring-up and entered the real actor/ref `compute_log_prob()`
+path. It then failed inside Megatron-Core's GLM multi-token-prediction branch with shape mismatches like:
+
+- `RuntimeError: Sizes of tensors must match except in dimension 2. Expected size 5120 but got size 156`
+- stack ending in:
+  - `megatron/core/transformer/multi_token_prediction.py::_concat_embeddings`
+
+Diagnosis:
+
+- The earlier no-packing change removed the explicit packed-sequence assertion, but `GPTModel.forward()` still
+  calls `_postprocess(..., mtp_in_postprocess=self.mtp_process)`.
+- That means GLM-Air's MTP branch is still active during actor/ref `compute_log_prob()` and PPO forward passes,
+  even though the RL objective only needs standard next-token logits.
+- Current `verl` Megatron PPO/SDPO tensor plumbing is not compatible with GLM-Air's MTP auxiliary forward path.
+
+Correct fix:
+
+- Temporarily disable `mtp_process` on the unwrapped Megatron model during actor/ref RL forward passes, then
+  restore it immediately afterward.
+- This keeps the GLM-Air checkpoint and architecture intact while telling the RL path to use only the base
+  next-token logits needed for PPO/SDPO.
+
+Why this fix:
+
+- It is lower risk than trying to retrofit full MTP support into the actor/ref RL path during bring-up.
+- It avoids modifying the checkpoint or forcing a model-config mismatch at load time.
+- For PPO/SDPO, ignoring the MTP auxiliary branch is acceptable because the RL loss is defined on the standard
+  next-token distribution.
+
+Next step:
+
+- relaunch on the same reserved 4-node cluster with the actor/ref MTP-disable patch
+- keep monitoring until the run reaches real training steps or exposes the next concrete blocker
