@@ -995,15 +995,17 @@ class MegatronPPOActor(BasePPOActor):
                     vocab_end = vocab_start + local_vocab_size
 
                     def distributed_logsumexp_from_shards(local_logits: torch.Tensor) -> torch.Tensor:
-                        shard_max = local_logits.max(dim=-1, keepdim=True).values
-                        global_max = shard_max.clone()
-                        torch.distributed.all_reduce(
-                            global_max, op=torch.distributed.ReduceOp.MAX, group=tp_group
-                        )
+                        # The max term is only for numerical stability, so it can be reduced
+                        # without autograd tracking. The exp-sum path must stay differentiable.
+                        with torch.no_grad():
+                            shard_max = local_logits.detach().max(dim=-1, keepdim=True).values
+                            global_max = shard_max.clone()
+                            torch.distributed.all_reduce(
+                                global_max, op=torch.distributed.ReduceOp.MAX, group=tp_group
+                            )
                         shard_exp_sum = torch.exp(local_logits - global_max).sum(dim=-1, keepdim=True)
-                        global_exp_sum = shard_exp_sum.clone()
-                        torch.distributed.all_reduce(
-                            global_exp_sum, op=torch.distributed.ReduceOp.SUM, group=tp_group
+                        global_exp_sum = tensor_parallel.reduce_from_tensor_model_parallel_region(
+                            shard_exp_sum, group=tp_group
                         )
                         return global_max + torch.log(global_exp_sum)
 
@@ -1015,25 +1017,25 @@ class MegatronPPOActor(BasePPOActor):
                         local_indices = (global_indices - vocab_start).masked_fill(~local_mask, 0)
                         local_values = torch.gather(local_logits, dim=-1, index=local_indices)
                         local_values = local_values * local_mask.to(local_logits.dtype)
-                        torch.distributed.all_reduce(
-                            local_values, op=torch.distributed.ReduceOp.SUM, group=tp_group
+                        return tensor_parallel.reduce_from_tensor_model_parallel_region(
+                            local_values, group=tp_group
                         )
-                        return local_values
 
                     def distributed_top1_index_from_shards(local_logits: torch.Tensor) -> torch.Tensor:
-                        local_top1_vals, local_top1_indices = local_logits.max(dim=-1)
-                        local_top1_indices = local_top1_indices.to(torch.int64) + vocab_start
-                        flat_vals = local_top1_vals.contiguous().reshape(-1)
-                        flat_indices = local_top1_indices.contiguous().reshape(-1)
-                        gathered_vals = [torch.empty_like(flat_vals) for _ in range(tp_world_size)]
-                        gathered_indices = [torch.empty_like(flat_indices) for _ in range(tp_world_size)]
-                        torch.distributed.all_gather(gathered_vals, flat_vals, group=tp_group)
-                        torch.distributed.all_gather(gathered_indices, flat_indices, group=tp_group)
-                        stacked_vals = torch.stack(gathered_vals, dim=0)
-                        stacked_indices = torch.stack(gathered_indices, dim=0)
-                        winning_rank = stacked_vals.argmax(dim=0, keepdim=True)
-                        winning_indices = torch.gather(stacked_indices, dim=0, index=winning_rank).squeeze(0)
-                        return winning_indices.view_as(local_top1_vals)
+                        with torch.no_grad():
+                            local_top1_vals, local_top1_indices = local_logits.detach().max(dim=-1)
+                            local_top1_indices = local_top1_indices.to(torch.int64) + vocab_start
+                            flat_vals = local_top1_vals.contiguous().reshape(-1)
+                            flat_indices = local_top1_indices.contiguous().reshape(-1)
+                            gathered_vals = [torch.empty_like(flat_vals) for _ in range(tp_world_size)]
+                            gathered_indices = [torch.empty_like(flat_indices) for _ in range(tp_world_size)]
+                            torch.distributed.all_gather(gathered_vals, flat_vals, group=tp_group)
+                            torch.distributed.all_gather(gathered_indices, flat_indices, group=tp_group)
+                            stacked_vals = torch.stack(gathered_vals, dim=0)
+                            stacked_indices = torch.stack(gathered_indices, dim=0)
+                            winning_rank = stacked_vals.argmax(dim=0, keepdim=True)
+                            winning_indices = torch.gather(stacked_indices, dim=0, index=winning_rank).squeeze(0)
+                            return winning_indices.view_as(local_top1_vals)
 
                     assert logits.shape[:2] == label.shape[:2]
                     assert label.shape == label_mask.shape
@@ -1064,15 +1066,15 @@ class MegatronPPOActor(BasePPOActor):
                                     "topk_log_probs": topk_logits - logsumexp,
                                     "student_mass_on_teacher_support": torch.exp(
                                         torch.logsumexp(topk_logits, dim=-1) - logsumexp.squeeze(-1)
-                                    ),
+                                    ).detach(),
                                     "student_top1_in_teacher_support": (
                                         (current_topk_indices == student_top1.unsqueeze(-1))
                                         .any(dim=-1)
                                         .to(topk_logits.dtype)
-                                    ),
+                                    ).detach(),
                                     "student_top1_matches_teacher_top1": (
                                         (student_top1 == current_topk_indices[..., 0]).to(topk_logits.dtype)
-                                    ),
+                                    ).detach(),
                                 }
                             )
                         else:
@@ -1116,7 +1118,7 @@ class MegatronPPOActor(BasePPOActor):
                                 (active_teacher_topk_indices == active_student_top1.unsqueeze(-1))
                                 .any(dim=-1)
                                 .to(active_topk_logits.dtype)
-                            )
+                            ).detach()
                             packed_student_top1_matches_teacher_top1 = torch.zeros(
                                 active_label_mask.shape,
                                 dtype=active_topk_logits.dtype,
@@ -1124,7 +1126,7 @@ class MegatronPPOActor(BasePPOActor):
                             )
                             packed_student_top1_matches_teacher_top1[active_label_mask] = (
                                 (active_student_top1 == active_teacher_topk_indices[:, 0]).to(active_topk_logits.dtype)
-                            )
+                            ).detach()
                             topk_metrics.update(
                                 {
                                     "topk_log_probs": packed_topk_log_probs,

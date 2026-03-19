@@ -771,3 +771,41 @@ Next step:
 
 - relaunch immediately on the same reserved 4-node cluster with the sharded teacher-topk actor path
 - keep monitoring until the run survives past the previous step-2 failure point or exposes the next blocker
+
+### [Applied] Replace raw TP collectives with autograd-safe Megatron reductions
+
+The first sharded `teacher_topk` implementation got past the earlier OOM point, but the next live run stalled in
+`actor_rollout_ref_update_actor` before emitting `training/global_step`.
+
+Evidence:
+
+- the managed job remained `RUNNING` with no traceback
+- head-pod GPUs were heavily allocated (`~117 GiB` each) but almost idle (`0-3%` utilization)
+- the stuck processes were all `ray::WorkerDict.actor_rollout_ref_update_actor`
+- `run.log` showed repeated autograd warnings around collective ops during the actor update phase
+
+Interpretation:
+
+- this looked like a distributed/autograd problem, not a fresh memory failure
+- in the low-memory GLM-Air path we were still using raw `torch.distributed` collectives on grad-bearing tensors:
+  - `all_reduce(MAX)` / `all_reduce(SUM)` inside distributed `logsumexp`
+  - `all_reduce(SUM)` to gather selected token logits from TP shards
+- that is the wrong primitive inside the Megatron actor forward for tensors that must participate in the SDPO loss
+
+Applied fix:
+
+- keep the numerically-stable max reduction under `torch.no_grad()` since it is only a constant shift
+- replace the grad-bearing sum reductions with Megatron autograd-safe tensor-parallel helpers:
+  - `tensor_parallel.reduce_from_tensor_model_parallel_region(...)`
+- keep the top-1 overlap metrics under `torch.no_grad()` / detached so they do not enter the backward graph
+
+Why this is the right fix:
+
+- it preserves the low-memory sharded `teacher_topk` design
+- it uses Megatron’s intended tensor-parallel autograd path instead of raw c10d collectives in the loss graph
+- it matches the observed failure mode: allocated memory, near-idle GPUs, no step logs, collective/autograd warnings
+
+Next step:
+
+- relaunch immediately on the same reserved 4-node cluster with the autograd-safe sharded path
+- keep monitoring until the run either reaches logged training steps or exposes the next concrete blocker
