@@ -20,14 +20,29 @@ The SDPO port keeps the normal `verl` rollout and update loop, but changes how t
 
 - The earlier Megatron collapse was traced to a real correctness bug in the full-logit path, not to a generic SDPO instability.
 - That bug is fixed on this branch, and the corrected Megatron implementation now works end to end on small-model Qwen Physics runs.
-- The strongest reference benchmark is still the Qwen Physics FSDP run:
+- The strongest local reference benchmark is the current branch-local Qwen Physics FSDP reproduction:
   - `val-core/sciknoweval/acc/mean@16 = 0.76171875` at step `305`
 - The corrected Megatron `student_topk` path is now in the same healthy regime:
   - latest visible `val-core/sciknoweval/acc/mean@16 = 0.72734375`
+- The current conclusion is:
+  - corrected Megatron is consistent with the current branch-local FSDP reproduction on this benchmark family
+  - exact parity with the original upstream FSDP/paper stack remains a separate question
 - The remaining question is parity quality and future large-scale design, not whether the Megatron implementation works at all.
 - For the detailed postmortem and experiment evidence, see:
   - [IMPLEMENTATION_REVIEW.md](/Users/zhoutong/code/verl/sdpo-megatron/IMPLEMENTATION_REVIEW.md)
   - [QWEN3_8B_PHYSICS_SECTION3_EXPERIMENT_LOG.md](/Users/zhoutong/code/verl/sdpo-megatron/experiment-logs/QWEN3_8B_PHYSICS_SECTION3_EXPERIMENT_LOG.md)
+
+## How to interpret the current FSDP benchmark
+
+- The current FSDP reference in this repo is a branch-local reproduction, not the untouched original upstream SDPO artifact.
+- That matters because the current FSDP benchmark shares this repo's trainer-side logic, launch stack, and later fixes; it is the right local baseline for Megatron parity work, but it should not be described as exact parity with the original external implementation.
+- So the strongest current claim is:
+  - corrected Megatron is approaching parity with the current branch-local FSDP reproduction on small models
+- The stronger claim that remains unproven is:
+  - exact parity with the original upstream FSDP SDPO implementation and paper stack
+- This distinction is especially important when reading Qwen Physics results:
+  - they establish that the Megatron implementation now works on a clean small-model benchmark
+  - they do not, by themselves, prove that every remaining gap to the paper is a Megatron-only issue
 
 ## Repo, branch, and target setup
 
@@ -388,7 +403,7 @@ Important conceptual point:
 
 ### 12. The current Megatron port supports full-logit top-k distillation
 
-The current Megatron parity path now supports the same broad SDPO objective family as the healthy FSDP path: full-logit distillation over a compressed top-k support.
+The current Megatron parity path now supports the same broad SDPO objective family as the current FSDP reproduction on this branch: full-logit distillation over a compressed top-k support.
 
 Current parity-focused config expectation:
 
@@ -637,7 +652,7 @@ Validation status:
 - YAML parse checks were run on the new config files
 - the public Qwen2.5-0.5B GSM8K Megatron smoke path completed successfully
 - the public Qwen3 8B Physics Megatron full-logit path completed healthy long runs after the full-logit correctness fixes
-- the corrected Megatron Qwen Physics run is in the same healthy regime as FSDP, though still slightly behind the strongest FSDP benchmark at matched steps
+- the corrected Megatron Qwen Physics run is in the same healthy regime as the current FSDP reproduction, though still slightly behind the strongest FSDP benchmark at matched steps
 - the OLMo experiments on the current cluster image remain confounded by runtime support issues and should not be treated as the final algorithm comparison
 
 ## Best levers for follow-up experiments
