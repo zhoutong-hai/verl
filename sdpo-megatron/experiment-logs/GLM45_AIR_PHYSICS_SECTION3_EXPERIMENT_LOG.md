@@ -309,3 +309,17 @@ Additional launcher hardening:
 - make `WANDB_API_KEY` optional in the SkyPilot YAML (`""` by default) so relaunches do not block on a missing local secret
 - when a key is present, keep the existing `['console', 'wandb']` logger path
 - when a key is absent, fall back to `['console']` so multi-node bring-up can continue and we can still debug from node-local logs
+
+Update after job 11:
+
+- the new rollout args were correctly reaching vLLM for `gpu_memory_utilization=0.24` and `max_num_batched_tokens=10240`
+- but rollout still failed because `vllm_async_server.py` was overwriting `config.max_model_len` with `hf_config.max_position_embeddings`
+- for GLM-Air that forced `--max_model_len 131072`, so vLLM sized KV cache against the full model context instead of the intended rollout cap
+- observed failure:
+  - `To serve at least one request with the model's max seq len (131072) ... available KV cache memory (0.88 GiB)`
+
+Fix:
+
+- respect an explicit rollout `max_model_len`
+- only fall back to `hf_config.max_position_embeddings` when the rollout config leaves `max_model_len` unset
+- still clamp explicit values so they never exceed the model's true positional limit
