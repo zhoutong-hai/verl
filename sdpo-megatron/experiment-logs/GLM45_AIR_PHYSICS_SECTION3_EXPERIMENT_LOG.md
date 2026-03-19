@@ -118,6 +118,39 @@ Current interpretation:
 - benchmark: SciKnowEval `physics`
 - model: `GLM-4.5-Air`
 - training path: Megatron
+
+## Latest bring-up findings
+
+### [Resolved Locally] GLM-Air MTP is incompatible with packed Megatron log-prob computation
+
+Observed on reserved 4-node cluster `verl-glm45-air-physics`, job `21`.
+
+Symptoms:
+
+- The job got past Ray startup, official Megatron-Bridge export, and vLLM wake-up.
+- It then failed during actor/ref `compute_log_prob()` with:
+  - `AssertionError: multi token prediction + sequence packing is not yet supported.`
+- Trace ended in:
+  - `megatron/core/transformer/multi_token_prediction.py`
+  - assertion on `packed_seq_params is None`
+
+Diagnosis:
+
+- GLM-4.5-Air exposes `num_nextn_predict_layers=1`, so Megatron MTP remains enabled in the model config.
+- Our Megatron actor/ref log-prob path was still using packed `thd` format because the launcher set:
+  - `actor_rollout_ref.model.use_remove_padding=true`
+- That combination is currently unsupported by Megatron-Core for MTP models.
+
+Fix:
+
+- Disable remove-padding / sequence packing for this GLM-Air launcher:
+  - `actor_rollout_ref.model.use_remove_padding=false`
+- This should force the actor/ref path back to `bshd` instead of packed `thd`, avoiding the MTP assertion while preserving the GLM-Air model architecture and weights.
+
+Why this fix:
+
+- It is lower risk than trying to disable MTP in the model config or modify the checkpoint.
+- GLM-Air bridge conversion already supports the MTP architecture, so keeping the model intact is safer for bring-up.
 - expected cluster shape: `4 x H200:8`
 - initial SDPO mode: `teacher_topk`
 - GRPO baseline variant included in the same launcher path

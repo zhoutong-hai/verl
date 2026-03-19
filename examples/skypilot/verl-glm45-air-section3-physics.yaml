@@ -314,7 +314,7 @@ run: |
       +data.apply_chat_template_kwargs.enable_thinking=false \
       actor_rollout_ref.model.path="$MODEL_PATH" \
       actor_rollout_ref.model.trust_remote_code=true \
-      actor_rollout_ref.model.use_remove_padding=true \
+      actor_rollout_ref.model.use_remove_padding=false \
       actor_rollout_ref.model.enable_gradient_checkpointing=true \
       actor_rollout_ref.actor.ppo_mini_batch_size="${ppo_mini_batch_size}" \
       actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
