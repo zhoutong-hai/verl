@@ -10,6 +10,16 @@ Extend the current Physics Section 3 SDPO and GRPO experiment setup to `GLM-4.5-
 - W&B tracking
 - comparable SDPO and GRPO launcher variants
 
+## Working instruction
+
+- Continue working this experiment end-to-end until the model training is in a good state.
+- Do not stop at setup, launch, or the first failure.
+- If the run fails or looks unhealthy, diagnose it, make the needed fix, relaunch, and keep iterating until the failure is resolved.
+- Do not stop after reporting a failure or a likely cause; carry the work through the fix and the next relaunch.
+- Once the run appears healthy, keep monitoring it in case another failure or instability appears later.
+- Do not pause and wait for another user instruction during that process unless there is a genuinely high-risk or irreversible decision.
+- Treat this log as the running record for the full bring-up, not just a launch note.
+
 ## Why this model is next
 
 - It is the next model of interest after the Qwen Physics bring-up.
