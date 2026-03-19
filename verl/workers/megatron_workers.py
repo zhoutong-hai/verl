@@ -796,8 +796,11 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
 
         metrics["self_distillation/teacher_update_rate"] = float(update_rate)
 
-        if self._ref_is_offload_param:
-            load_megatron_model_to_gpu(self.ref_module, load_grad=False)
+        # If the ref teacher is parameter-offloaded, keep the EMA refresh on CPU.
+        # Loading the full ref model back to GPU immediately after the actor update
+        # can temporarily double resident model memory and OOM large models like
+        # GLM-4.5-Air before the actor/offload cleanup runs.
+        ref_update_on_cpu = self._ref_is_offload_param
 
         with torch.no_grad():
             gap_sq_sum = None
@@ -826,7 +829,7 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
                 teacher_actor_abs_before * (1.0 - update_rate)
             )
 
-        if self._ref_is_offload_param:
+        if not ref_update_on_cpu and self._ref_is_offload_param:
             offload_megatron_model_to_cpu(self.ref_module)
 
         return metrics

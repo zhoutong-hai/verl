@@ -637,3 +637,41 @@ Next step:
 
 - relaunch immediately on the same reserved 4-node cluster with the new actor/ref token budget split
 - keep monitoring until the run reaches real training steps or exposes the next blocker
+
+### [Applied] EMA teacher refresh for offloaded refs must stay on CPU
+
+After the token-budget fix, the next relaunch got past the earlier `max_seq_len` assertion and entered the real
+SDPO update path. It then failed during the teacher EMA refresh with repeated errors like:
+
+- `torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 22.00 MiB`
+- stack site:
+  - `verl/workers/megatron_workers.py::_maybe_update_self_distillation_teacher`
+  - `verl/utils/megatron_utils.py::load_megatron_model_to_gpu`
+
+Interpretation:
+
+- This is a different failure from the earlier full-logit actor OOM and the token-budget assertion.
+- We now have:
+  - actor param/grad/optimizer offload enabled
+  - ref param offload enabled
+- But `_maybe_update_self_distillation_teacher()` was still loading the full ref teacher back onto GPU for the
+  EMA update immediately after the actor update, before the actor cleanup/offload path finished.
+- On GLM-Air scale, that transient actor+ref co-residency is enough to OOM even on H200.
+
+Applied fix:
+
+- when the ref teacher is parameter-offloaded, keep the EMA teacher update on CPU instead of loading the ref
+  back to GPU
+- the EMA loop already copies `actor_param.data` to `ref_param.device`, so CPU-side EMA is a correct low-risk path
+  for the offloaded-ref case
+
+Why this fix:
+
+- It directly removes the transient double-residency that is causing the OOM.
+- It preserves the current memory-conservative training shape and avoids raising sequence budgets again.
+- EMA teacher refresh is bandwidth-heavy but mathematically simple; doing it on CPU is acceptable for bring-up.
+
+Next step:
+
+- relaunch immediately on the same reserved 4-node cluster with the CPU-side offloaded-ref EMA refresh
+- keep monitoring until the run reaches real training steps or exposes the next blocker
