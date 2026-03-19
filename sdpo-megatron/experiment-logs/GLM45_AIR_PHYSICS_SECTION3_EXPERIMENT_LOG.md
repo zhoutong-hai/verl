@@ -291,3 +291,15 @@ Current action:
 - lower `VLLM_GPU_MEM_UTIL` again from `0.25` to `0.22`
 - reduce the copied rollout/training `max_model_len` buffer from `18944` to `12288`, which is still above the current `2048 + 8192` prompt/response budget
 - relaunch on the same reserved 4-node cluster
+
+Update after job 9:
+
+- `VLLM_GPU_MEM_UTIL=0.22` got past the earlier "free memory is less than desired utilization" gate
+- but rollout still failed later during vLLM KV-cache initialization with `ValueError: No available memory for the cache blocks`
+- this implies `0.22` is too low in the opposite direction: the admitted rollout budget is now below what GLM-Air needs to leave any KV-cache blocks after weights are resident
+
+Next action:
+
+- raise `VLLM_GPU_MEM_UTIL` to `0.24`
+- tighten `max_model_len` from `12288` to `10240`, matching the current `2048 + 8192` prompt/response budget and the existing `max_reprompt_len=10240`
+- relaunch immediately on the same reserved 4-node cluster
