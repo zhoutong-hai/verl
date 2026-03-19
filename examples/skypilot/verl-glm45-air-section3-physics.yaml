@@ -263,10 +263,10 @@ run: |
     export VLLM_GPU_MEM_UTIL
 
     max_prompt_length=2048
-    max_response_length=8192
-    max_model_len=10240
-    train_batch_size=32
-    ppo_mini_batch_size=32
+    max_response_length=4096
+    max_model_len=6144
+    train_batch_size=16
+    ppo_mini_batch_size=16
     rollout_n=8
     test_freq=5
     total_epochs=30
@@ -316,6 +316,7 @@ run: |
       actor_rollout_ref.model.trust_remote_code=true \
       actor_rollout_ref.model.use_remove_padding=false \
       actor_rollout_ref.model.enable_gradient_checkpointing=true \
+      actor_rollout_ref.actor.use_dynamic_bsz=true \
       actor_rollout_ref.actor.ppo_mini_batch_size="${ppo_mini_batch_size}" \
       actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
       actor_rollout_ref.actor.ppo_max_token_len_per_gpu="${max_model_len}" \
@@ -325,6 +326,9 @@ run: |
       actor_rollout_ref.actor.megatron.use_mbridge=true \
       actor_rollout_ref.actor.megatron.vanilla_mbridge=false \
       actor_rollout_ref.actor.megatron.use_remove_padding=false \
+      actor_rollout_ref.actor.megatron.param_offload=true \
+      actor_rollout_ref.actor.megatron.grad_offload=true \
+      actor_rollout_ref.actor.megatron.optimizer_offload=true \
       actor_rollout_ref.actor.megatron.tensor_model_parallel_size="${TRAIN_TP_SIZE}" \
       actor_rollout_ref.actor.megatron.pipeline_model_parallel_size="${TRAIN_PP_SIZE}" \
       actor_rollout_ref.actor.megatron.context_parallel_size="${TRAIN_CP_SIZE}" \
@@ -350,6 +354,7 @@ run: |
       actor_rollout_ref.ref.megatron.use_mbridge=true \
       actor_rollout_ref.ref.megatron.vanilla_mbridge=false \
       actor_rollout_ref.ref.megatron.use_remove_padding=false \
+      actor_rollout_ref.ref.megatron.param_offload=true \
       actor_rollout_ref.ref.megatron.tensor_model_parallel_size="${TRAIN_TP_SIZE}" \
       actor_rollout_ref.ref.megatron.pipeline_model_parallel_size="${TRAIN_PP_SIZE}" \
       actor_rollout_ref.ref.megatron.context_parallel_size="${TRAIN_CP_SIZE}" \

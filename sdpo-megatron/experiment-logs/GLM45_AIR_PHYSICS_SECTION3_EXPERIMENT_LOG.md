@@ -547,3 +547,48 @@ Next step:
 
 - relaunch on the same reserved 4-node cluster with the actor/ref MTP-disable patch
 - keep monitoring until the run reaches real training steps or exposes the next concrete blocker
+
+### [Applied] GLM-Air actor-update OOM requires a more conservative RL memory profile
+
+With the MTP-forward fix in place, the next run finally entered the real actor update and then failed with:
+
+- `torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 4.62 GiB`
+- crash site:
+  - `verl/workers/actor/megatron_actor.py::logits_processor`
+  - specifically at `torch.logsumexp(active_full_logits, dim=-1, keepdim=True)`
+
+Interpretation:
+
+- This is no longer a model-integration bug. The run is reaching the SDPO update path correctly.
+- The immediate issue is memory pressure from the Megatron full-logit SDPO actor branch on GLM-Air:
+  - 4-node GLM-Air + MoE + long responses + full-logit top-k SDPO is materially heavier than the Qwen 8B setup
+  - our launcher was still carrying an `8192` response budget and `10240` actor token budget
+- The repo's own GLM-Air Megatron recipe already uses a more memory-conservative pattern:
+  - dynamic batch sizing
+  - Megatron offload
+  - a setup tuned specifically for GLM-Air-scale memory pressure
+
+Applied mitigation:
+
+- keep the same SDPO Megatron experiment family and the same reserved 4-node cluster
+- reduce the training shape and enable the existing Megatron memory levers in the single SkyPilot YAML:
+  - `max_response_length: 4096`
+  - `max_model_len: 6144`
+  - `train_batch_size: 16`
+  - `ppo_mini_batch_size: 16`
+  - `actor.use_dynamic_bsz=true`
+  - `actor.megatron.param_offload=true`
+  - `actor.megatron.grad_offload=true`
+  - `actor.megatron.optimizer_offload=true`
+  - `ref.megatron.param_offload=true`
+
+Why this path first:
+
+- It is the lowest-risk way to keep the experiment moving on the current 4-node reservation.
+- It stays within supported `verl` Megatron configuration knobs rather than adding a new custom autograd path for SDPO top-k on sharded logits during bring-up.
+- If this still fails, the next escalation would be implementing a more memory-efficient Megatron SDPO top-k path; for now the operational shape reduction is the correct first move.
+
+Next step:
+
+- relaunch immediately on the same reserved 4-node cluster with the updated single YAML
+- keep monitoring until the run either reaches stable training steps or exposes the next concrete blocker
