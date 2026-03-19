@@ -88,7 +88,93 @@ setup: |
   pip3 install --upgrade "megatron-core==0.15.0"
   pip3 install --no-deps "git+https://github.com/NVIDIA-NeMo/Megatron-Bridge.git@v0.2.2"
 
-  python3 -c "import subprocess,re;from pathlib import Path;loc=subprocess.run(['pip3','show','megatron-bridge'],capture_output=True,text=True).stdout;m=re.search(r'Location: (.+)',loc);site=Path(m.group(1).strip()) if m else None;gpt=site/'megatron/bridge/models/gpt_provider.py' if site else None;c=gpt.read_text() if gpt and gpt.exists() else '';old='import modelopt.torch.distill as mtd\\nimport modelopt.torch.distill.plugins.megatron as mtd_mcore';new='try:\\n    import modelopt.torch.distill as mtd\\n    import modelopt.torch.distill.plugins.megatron as mtd_mcore\\nexcept ImportError:\\n    mtd = None\\n    mtd_mcore = None';c=c.replace(old,new) if old in c else c;gpt.write_text(c) if c and 'mtd_mcore = None' not in gpt.read_text() else None;print(f'Patched {gpt}') if c else print('No patch needed')"
+  python3 - <<'PY'
+  import re
+  import subprocess
+  from pathlib import Path
+
+  loc = subprocess.run(["pip3", "show", "megatron-bridge"], capture_output=True, text=True, check=True).stdout
+  match = re.search(r"Location: (.+)", loc)
+  if match is None:
+      raise SystemExit("megatron-bridge install path not found")
+
+  site = Path(match.group(1).strip())
+
+  gpt = site / "megatron/bridge/models/gpt_provider.py"
+  if gpt.exists():
+      text = gpt.read_text()
+      old = "import modelopt.torch.distill as mtd\nimport modelopt.torch.distill.plugins.megatron as mtd_mcore"
+      new = (
+          "try:\n"
+          "    import modelopt.torch.distill as mtd\n"
+          "    import modelopt.torch.distill.plugins.megatron as mtd_mcore\n"
+          "except ImportError:\n"
+          "    mtd = None\n"
+          "    mtd_mcore = None"
+      )
+      if old in text and "mtd_mcore = None" not in text:
+          gpt.write_text(text.replace(old, new))
+          print(f"Patched {gpt}")
+      else:
+          print(f"No gpt_provider patch needed: {gpt}")
+
+  param_mapping = site / "megatron/bridge/models/conversion/param_mapping.py"
+  if param_mapping.exists():
+      text = param_mapping.read_text()
+      old = "\n".join(
+          [
+              "        target_tensor_spec = None",
+              "        src_rank = None  # Rank *inside* the PP group.",
+              "        for rank, spec in enumerate(tensor_spec_output):",
+              "            if spec is not None:",
+              "                if target_tensor_spec is not None:",
+              '                    raise ValueError(f"Tensor exists on more than one PP rank. Found on ranks {src_rank} and {rank}.")',
+              "                target_tensor_spec = spec",
+              "                src_rank = rank",
+              "",
+          ]
+      )
+      new = "\n".join(
+          [
+              "        target_tensor_spec = None",
+              "        src_rank = None  # Rank *inside* the PP group.",
+              "        duplicate_ranks = []",
+              "        for rank, spec in enumerate(tensor_spec_output):",
+              "            if spec is not None:",
+              "                if target_tensor_spec is None:",
+              "                    target_tensor_spec = spec",
+              "                    src_rank = rank",
+              "                elif spec != target_tensor_spec:",
+              "                    raise ValueError(",
+              '                        f"Tensor exists on more than one PP rank with mismatched specs for {cache_key}. "',
+              '                        f"Found ranks {src_rank} and {rank}: {target_tensor_spec} vs {spec}."',
+              "                    )",
+              "                else:",
+              "                    duplicate_ranks.append(rank)",
+              "",
+              "        if duplicate_ranks:",
+              '            warned = getattr(self, "_duplicate_pp_rank_warned_cache", None)',
+              "            if warned is None:",
+              "                warned = set()",
+              "                self._duplicate_pp_rank_warned_cache = warned",
+              "            warn_key = cache_key if cache_key is not None else (src_rank, tuple(duplicate_ranks), target_tensor_spec)",
+              "            if warn_key not in warned:",
+              "                logger.warning(",
+              '                    "Tensor exists on multiple PP ranks with identical specs; using source rank %s for cache_key=%s and ignoring duplicate ranks=%s",',
+              "                    src_rank,",
+              "                    cache_key,",
+              "                    duplicate_ranks,",
+              "                )",
+              "                warned.add(warn_key)",
+              "",
+          ]
+      )
+      if old in text and "duplicate_ranks = []" not in text:
+          param_mapping.write_text(text.replace(old, new))
+          print(f"Patched {param_mapping}")
+      else:
+          print(f"No param_mapping patch needed: {param_mapping}")
+  PY
 
   python3 -c "import verl; import pathlib; print(pathlib.Path(verl.__file__).resolve())"
 

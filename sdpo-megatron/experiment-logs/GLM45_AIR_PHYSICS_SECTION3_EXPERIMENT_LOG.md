@@ -359,3 +359,44 @@ Next step:
 
 - relaunch on the same reserved 4-node cluster
 - keep monitoring until the run either reaches the first real rollout/training step or exposes the next concrete blocker
+
+### [Resolved Locally] Allow replicated PP-rank tensor specs during GLM-Air Megatron-Bridge export
+
+After disabling NVLS, the next relaunch advanced further again:
+
+- 4-node Ray startup succeeded
+- Megatron actor/ref workers initialized
+- GLM-Air actor/ref weights loaded
+- vLLM servers started with the intended rollout limits
+- training reached the first rollout wake-up before failing
+
+The new blocker appeared in Megatron-Bridge during actor-to-vLLM weight export:
+
+- `ValueError: Tensor exists on more than one PP rank. Found on ranks 0 and 1.`
+
+Why this is likely the right interpretation:
+
+- the failure comes from `megatron.bridge.models.conversion.param_mapping.broadcast_from_pp_rank`
+- that helper assumes a converted tensor should exist on exactly one pipeline-parallel rank
+- for GLM-Air, some exported tensors appear to be replicated across PP stages with the same tensor metadata
+- the helper was crashing before it even checked whether the duplicated owners were actually compatible
+
+Fix applied in the launcher setup patch:
+
+- keep using the official `megatron-bridge` path (`vanilla_mbridge=false`)
+- patch the installed `param_mapping.py` during `setup:`
+- accept duplicated PP owners when their tensor specs are identical
+- choose the first owner as the broadcast source
+- log a warning with `cache_key` so the duplicated weight can still be identified later
+- still fail loudly if multiple PP ranks report mismatched specs for the same tensor
+
+Why not switch to `vanilla_mbridge=true` instead:
+
+- the older `mbridge` package on this container is not compatible with the installed `megatron-core==0.15.0`
+- direct import currently fails with:
+  - `ModuleNotFoundError: No module named 'megatron.core.distributed.custom_fsdp'`
+
+Next step:
+
+- relaunch on the same reserved 4-node cluster with the patched official bridge
+- keep monitoring until the run either reaches the first training step or exposes the next concrete bridge/cache-key issue
