@@ -1,6 +1,6 @@
-# SDPO in `verl v0.7.0`: Main Idea, Port Structure, and Experiment Guide
+# SDPO in `verl v0.7.0`: Main Idea, Port Structure, Experiment Guide, and Current Status
 
-Last updated: 2026-03-13
+Last updated: 2026-03-18
 
 ## Why this note exists
 
@@ -14,7 +14,20 @@ It replaces the earlier "handoff only" framing. The goal is not just to record w
 
 ## One-paragraph summary
 
-The SDPO port keeps the normal `verl` rollout and update loop, but changes how the actor is supervised. During training, the trainer finds successful trajectories within each prompt group, turns those successes and optional feedback into a reprompted teacher context, uses the reference model as the teacher to score the original sampled response under that improved context, and then updates the actor with a self-distillation loss instead of the usual PPO policy loss. After the actor update, the teacher is refreshed with EMA.
+The SDPO port keeps the normal `verl` rollout and update loop, but changes how the actor is supervised. During training, the trainer finds successful trajectories within each prompt group, turns those successes and optional feedback into a reprompted teacher context, uses the reference model as the teacher to score the original sampled response under that improved context, and then updates the actor with a self-distillation loss instead of the usual PPO policy loss. On the current branch, the main Megatron parity path supports full-logit top-k SDPO through `trainer_ref`, including both `support_mode="teacher_topk"` and `support_mode="student_topk"`, and the teacher is refreshed with EMA after the actor update.
+
+## Status snapshot
+
+- The earlier Megatron collapse was traced to a real correctness bug in the full-logit path, not to a generic SDPO instability.
+- That bug is fixed on this branch, and the corrected Megatron implementation now works end to end on small-model Qwen Physics runs.
+- The strongest reference benchmark is still the Qwen Physics FSDP run:
+  - `val-core/sciknoweval/acc/mean@16 = 0.76171875` at step `305`
+- The corrected Megatron `student_topk` path is now in the same healthy regime:
+  - latest visible `val-core/sciknoweval/acc/mean@16 = 0.72734375`
+- The remaining question is parity quality and future large-scale design, not whether the Megatron implementation works at all.
+- For the detailed postmortem and experiment evidence, see:
+  - [IMPLEMENTATION_REVIEW.md](/Users/zhoutong/code/verl/sdpo-megatron/IMPLEMENTATION_REVIEW.md)
+  - [QWEN3_8B_PHYSICS_SECTION3_EXPERIMENT_LOG.md](/Users/zhoutong/code/verl/sdpo-megatron/experiment-logs/QWEN3_8B_PHYSICS_SECTION3_EXPERIMENT_LOG.md)
 
 ## Repo, branch, and target setup
 
@@ -89,13 +102,13 @@ In practice, that means:
 This is a different role from a standard KL reference policy:
 
 - KL ref policy: usually frozen, used to measure divergence from the actor
-- SDPO teacher in this port: moving, used to produce `teacher_log_probs` for distillation
+- SDPO teacher in this port: moving, used to produce teacher distillation targets for the actor
 
 Memory and lifecycle notes:
 
 - the teacher exists as `ref_module` inside the Megatron worker,
 - it may stay on GPU, or be offloaded to CPU depending on ref offload settings,
-- it is loaded back to GPU when computing teacher log-probs or applying EMA.
+- it is loaded back to GPU when computing teacher targets or applying EMA.
 
 Checkpointing note:
 
@@ -140,17 +153,17 @@ flowchart LR
     C --> I["Keep original sampled response fixed"]
     H --> J["Concatenate teacher prompt + original response"]
     I --> J
-    J --> K["Reference model scoring<br/>compute log p_teacher(original response | reprompted context)"]
-    K --> L["Add to training batch<br/>teacher_log_probs<br/>self_distillation_mask"]
+    J --> K["Reference model scoring<br/>build teacher targets under reprompted context"]
+    K --> L["Add to training batch<br/>teacher_topk_indices<br/>teacher_topk_log_probs<br/>self_distillation_mask<br/>or legacy teacher_log_probs"]
 ```
 
 Phase 2: actor update and teacher refresh
 
 ```mermaid
 flowchart LR
-    E["Normal RL path continues<br/>values, token_level_scores, advantages, ..."] --> L["Training batch now includes<br/>teacher_log_probs<br/>self_distillation_mask"]
-    L --> M["Megatron actor update<br/>compute current student log_probs on original response"]
-    M --> N["SDPO loss<br/>compare student_log_probs vs teacher_log_probs<br/>masked by response_mask and self_distillation_mask"]
+    E["Normal RL path continues<br/>values, token_level_scores, advantages, ..."] --> L["Training batch now includes<br/>teacher targets<br/>self_distillation_mask"]
+    L --> M["Megatron actor update<br/>compute current student log_probs or student_topk_log_probs"]
+    M --> N["SDPO loss<br/>compare student targets vs teacher targets<br/>masked by response_mask and self_distillation_mask"]
     N --> O["Actor optimizer step"]
     O --> P["EMA teacher update<br/>reference <- (1-rate)*reference + rate*actor"]
 ```
@@ -174,18 +187,18 @@ flowchart LR
     S1["Rollout batch<br/>responses<br/>response_mask<br/>old_log_probs<br/>raw_prompt<br/>uid"] --> S2["Reward step<br/>reward_tensor<br/>token_level_scores<br/>optional feedback"]
     S2 --> S3["GRPO advantage step still runs<br/>advantages<br/>returns"]
     S2 --> S4["SDPO teacher prep<br/>successful sibling mining by uid<br/>reprompt construction"]
-    S4 --> S5["Reference scoring under teacher context<br/>teacher_log_probs"]
+    S4 --> S5["Reference scoring under teacher context<br/>teacher_topk_log_probs + indices<br/>or legacy teacher_log_probs"]
     S5 --> S6["Mask valid SDPO samples<br/>self_distillation_mask"]
     S3 --> S7["Final actor batch in SDPO mode"]
     S6 --> S7
-    S7["Carries both:<br/>old_log_probs<br/>advantages<br/>response_mask<br/>teacher_log_probs<br/>self_distillation_mask"] --> S8["Actor loss uses teacher_log_probs<br/>not advantages<br/>for main policy update"]
+    S7["Carries both:<br/>old_log_probs<br/>advantages<br/>response_mask<br/>teacher targets<br/>self_distillation_mask"] --> S8["Actor loss uses teacher targets<br/>not advantages<br/>for main policy update"]
 ```
 
 Key reading:
 
 - In regular GRPO, `advantages` are the direct actor-training target.
 - In this SDPO port, `advantages` are still computed because the outer trainer loop is still GRPO-shaped.
-- But the SDPO actor-loss branch uses `teacher_log_probs` plus `self_distillation_mask` as the main supervision signal.
+- But the SDPO actor-loss branch uses teacher targets plus `self_distillation_mask` as the main supervision signal.
 - So the final training batch contains both GRPO-style fields and SDPO-specific fields, even though the actor update is driven by the SDPO target when `loss_mode: sdpo`.
 
 ## Field-level walkthrough with annotation
@@ -312,21 +325,29 @@ Why this matters:
 
 ### 8. The reference model acts as the teacher
 
-The reprompted batch is passed through the reference-policy scoring path. The result is stored as `teacher_log_probs`.
+The reprompted batch is passed through the reference-policy scoring path. On the current branch, the main Megatron parity path stores compressed top-k teacher targets rather than only per-token teacher log-probs.
 
 Relevant method:
 
 - `_compute_self_distillation_teacher_log_prob(...)`
+- `_compute_self_distillation_teacher_targets(...)`
 
 Important output fields:
 
-- `teacher_log_probs`
+- `teacher_topk_indices`
+- `teacher_topk_log_probs`
 - `self_distillation_mask`
 
 Shape intuition:
 
-- `teacher_log_probs`: `[batch_size, response_length]`
+- `teacher_topk_indices`: `[batch_size, response_length, k]` or packed equivalent
+- `teacher_topk_log_probs`: `[batch_size, response_length, k]` or packed equivalent
 - `self_distillation_mask`: `[batch_size]`
+
+Legacy note:
+
+- older runs and the earliest Megatron port used `teacher_log_probs: [batch_size, response_length]`
+- that sampled-token path is now mainly historical context, not the main parity path
 
 ### 9. Masking prevents fake supervision
 
@@ -336,13 +357,13 @@ This keeps the actor from receiving fake SDPO supervision on samples where there
 
 ### 10. The SDPO fields are merged back into the normal training batch
 
-After the teacher log-probs are computed, the trainer unions them back into the normal batch before the actor update.
+After the teacher targets are computed, the trainer unions them back into the normal batch before the actor update.
 
 Relevant seam in the main training loop:
 
 - `ray_trainer.py`
 - call to `_maybe_build_self_distillation_batch(...)`
-- call to `_compute_self_distillation_teacher_log_prob(...)`
+- call to `_compute_self_distillation_teacher_targets(...)`
 
 This is why the port feels lightweight. The overall loop is still recognizably `verl`; the batch just carries a few extra fields when `loss_mode == "sdpo"`.
 
@@ -350,7 +371,8 @@ This is why the port feels lightweight. The overall loop is still recognizably `
 
 In the Megatron actor, SDPO mode selects these extra fields:
 
-- `teacher_log_probs`
+- `teacher_topk_indices`
+- `teacher_topk_log_probs`
 - `self_distillation_mask`
 
 Then it swaps out the usual policy loss computation and calls `compute_self_distillation_loss(...)`.
@@ -364,25 +386,37 @@ Important conceptual point:
 - `advantages` are still present in the batch because the rest of the trainer pipeline is still RL-shaped
 - but the SDPO actor-loss branch itself uses teacher supervision rather than the usual PPO policy-gradient target
 
-### 12. The current Megatron port is token-level distillation only
+### 12. The current Megatron port supports full-logit top-k distillation
 
-The general loss helper supports a full-logit distillation branch, but the Megatron port on `v0.7.0` currently uses only the token-level path.
+The current Megatron parity path now supports the same broad SDPO objective family as the healthy FSDP path: full-logit distillation over a compressed top-k support.
 
-Current config expectation:
+Current parity-focused config expectation:
 
-- `full_logit_distillation: false`
-- `alpha: 1.0`
+- `full_logit_distillation: true`
+- `distillation_topk: 100`
+- `alpha: 0.5`
+- `support_mode: "teacher_topk"` or `"student_topk"`
 
-In the non-full-logit branch, the key objects are:
+Practical note:
 
-- `student_log_probs`
-- `teacher_log_probs`
+- `teacher_topk` is the current stable baseline path on this branch
+- `student_topk` is the parity-focused extension that now works on small models and is the right direction for further parity experiments
+
+In the current full-logit branch, the key objects are:
+
+- `student_topk_log_probs`
+- `teacher_topk_log_probs`
 - `response_mask`
 - optional `self_distillation_mask`
 
 Relevant file:
 
 - `verl/trainer/ppo/core_algos.py`
+
+Important note:
+
+- the earlier sampled-token reverse-KL path still exists as historical context and for older runs
+- but it is no longer the recommended path for Megatron parity work on this branch
 
 ### 13. The teacher is refreshed with EMA after the actor step
 
@@ -446,8 +480,8 @@ What changed:
 - find successful samples by `uid`
 - build teacher reprompts
 - tokenize reprompts
-- compute teacher log-probs on the original response
-- add `teacher_log_probs` and `self_distillation_mask` to the batch
+- compute teacher targets on the original response
+- add `teacher_topk_indices`, `teacher_topk_log_probs`, and `self_distillation_mask` to the batch
 
 Why it matters:
 
@@ -465,7 +499,7 @@ What changed:
 
 Why it matters:
 
-- this is the actual objective used by the actor in SDPO mode
+- this is the actual objective used by the actor in SDPO mode, including the shared full-logit top-k branch
 
 ### Megatron actor integration
 
@@ -475,10 +509,11 @@ File:
 
 What changed:
 
-- pass through `teacher_log_probs`
+- pass through `teacher_topk_indices`
+- pass through `teacher_topk_log_probs`
 - pass through `self_distillation_mask`
 - route actor loss into SDPO loss branch
-- reject full-logit SDPO on this Megatron port
+- support `support_mode="teacher_topk"` and `support_mode="student_topk"`
 
 Why it matters:
 
@@ -523,12 +558,12 @@ The easiest way to separate the changes is:
 
 | Area | Generic SDPO change | Megatron-specific change | Main files |
 | --- | --- | --- | --- |
-| Config surface | Add `loss_mode: sdpo` and self-distillation config knobs | Provide a Megatron trainer config that explicitly selects token-level SDPO and compatible settings | `verl/workers/config/actor.py`, `verl/trainer/config/sdpo_megatron_trainer.yaml` |
+| Config surface | Add `loss_mode: sdpo` and self-distillation config knobs | Provide Megatron configs that select full-logit top-k SDPO and expose `support_mode` | `verl/workers/config/actor.py`, `verl/trainer/config/sdpo_megatron_trainer.yaml` |
 | Trainer orchestration | Require a teacher path when SDPO is enabled | Force the Megatron `ActorRolloutRef` path on `v0.7.0` and reject unsupported worker/KL combinations | `verl/trainer/main_ppo.py` |
 | Success mining and reprompting | Group by `uid`, find successful siblings, build reprompted teacher inputs, collect optional feedback | No special Megatron math here; this part is mostly backend-agnostic trainer logic | `verl/trainer/ppo/ray_trainer.py` |
-| Teacher target construction | Score the original sampled response under the teacher context and attach `teacher_log_probs` plus `self_distillation_mask` to the batch | Reuse the Megatron reference-policy scoring path to produce those teacher log-probs | `verl/trainer/ppo/ray_trainer.py` |
-| Actor loss | Replace normal PPO or GRPO actor target with self-distillation loss in SDPO mode | Teach the Megatron actor to ingest `teacher_log_probs` and `self_distillation_mask` during minibatch updates | `verl/workers/actor/megatron_actor.py`, `verl/trainer/ppo/core_algos.py` |
-| Distillation objective | Define `compute_self_distillation_loss(...)` | Limit Megatron `v0.7.0` to token-level SDPO and reject full-logit mode for now | `verl/trainer/ppo/core_algos.py`, `verl/workers/actor/megatron_actor.py` |
+| Teacher target construction | Score the original sampled response under the teacher context and attach teacher targets plus `self_distillation_mask` to the batch | Reuse the Megatron reference-policy scoring path to produce top-k teacher targets under `trainer_ref` | `verl/trainer/ppo/ray_trainer.py`, `verl/workers/megatron_workers.py` |
+| Actor loss | Replace normal PPO or GRPO actor target with self-distillation loss in SDPO mode | Teach the Megatron actor to ingest top-k teacher targets and `self_distillation_mask` during minibatch updates | `verl/workers/actor/megatron_actor.py`, `verl/trainer/ppo/core_algos.py` |
+| Distillation objective | Define `compute_self_distillation_loss(...)` | Use the shared full-logit top-k branch for Megatron parity runs; keep sampled-token mode as historical/legacy | `verl/trainer/ppo/core_algos.py`, `verl/workers/actor/megatron_actor.py` |
 | Teacher model lifecycle | Keep a separate teacher that tracks the student slowly | Build and maintain both `actor_module` and `ref_module` inside the Megatron worker and update the ref model with EMA after actor optimization | `verl/workers/megatron_workers.py` |
 | Memory and offload behavior | Not part of the paper idea directly | Load and offload the Megatron reference model around EMA when ref-param offload is enabled | `verl/workers/megatron_workers.py` |
 
@@ -588,18 +623,22 @@ Current boundaries:
 
 - Megatron only
 - `verl v0.7.0` legacy worker path only
-- token-level SDPO only
-- full-logit SDPO is not implemented in the Megatron path
+- full-logit top-k SDPO is implemented through `trainer_ref`
+- `support_mode="teacher_topk"` and `support_mode="student_topk"` are both implemented
 - `actor.use_kl_loss` must be `false`
 - `algorithm.use_kl_in_reward` must be `false`
 - EMA is the only implemented teacher regularization mode in Megatron
 - richer feedback only works if the reward function returns `feedback`
+- `student_topk` is intentionally outer-step-frozen and currently assumes `ppo_epochs = 1`
 
 Validation status:
 
 - Python AST parse checks were run on modified Python files
 - YAML parse checks were run on the new config files
-- no full training run has been executed yet
+- the public Qwen2.5-0.5B GSM8K Megatron smoke path completed successfully
+- the public Qwen3 8B Physics Megatron full-logit path completed healthy long runs after the full-logit correctness fixes
+- the corrected Megatron Qwen Physics run is in the same healthy regime as FSDP, though still slightly behind the strongest FSDP benchmark at matched steps
+- the OLMo experiments on the current cluster image remain confounded by runtime support issues and should not be treated as the final algorithm comparison
 
 ## Best levers for follow-up experiments
 
@@ -654,10 +693,10 @@ Primary code:
 
 Good experiments:
 
-- alter token-level objective details
+- compare `support_mode="teacher_topk"` vs `support_mode="student_topk"`
 - change or remove importance-weight clipping
-- implement full-logit distillation for Megatron
-- compare reverse-KL-like behavior against other choices
+- inspect tail-bucket behavior and support overlap on matched rollout batches
+- compare parity-focused Megatron against FSDP on the same cached rollout batch
 
 ### 5. Change teacher dynamics
 
@@ -700,18 +739,18 @@ Good experiments:
 
 ## Suggested low-risk first experiments
 
-If the goal is to build intuition before large training runs, these are good first ablations:
+If the goal is to build intuition before large training runs, these are the next good parity-focused ablations:
 
-1. Vary `success_reward_threshold`.
-2. Toggle `dont_reprompt_on_self_success`.
-3. Toggle `remove_thinking_from_demonstration`.
-4. Enable reward feedback and compare with solution-only reprompts.
+1. Compare `support_mode="teacher_topk"` against `support_mode="student_topk"` on the same task.
+2. Vary `success_reward_threshold`.
+3. Toggle `dont_reprompt_on_self_success`.
+4. Toggle `remove_thinking_from_demonstration`.
 5. Sweep `teacher_update_rate`.
-6. Compare SDPO config against a GRPO baseline with the same launch environment.
+6. Compare corrected SDPO against a GRPO baseline with the same launch environment.
 
 ## Small public smoke test
 
-For a first end-to-end check, a practical public setup is:
+For a minimal regression check, a practical public setup is:
 
 - model: `Qwen/Qwen2.5-0.5B-Instruct`
 - dataset: `openai/gsm8k`
@@ -764,13 +803,15 @@ Notes on the SkyPilot smoke path:
 - it defaults to `VARIANT=sdpo`,
 - you can switch to the GRPO baseline by editing `envs.VARIANT` in the SkyPilot YAML.
 
+This smoke path has already been completed successfully on this branch, and it remains the quickest regression test for the Megatron SDPO path.
+
 Useful things to confirm in the logs:
 
 - the GRPO run finishes cleanly on the tiny setup,
 - the SDPO run enters `loss_mode == "sdpo"`,
 - `self_distillation/reprompt_sample_fraction` is above zero,
 - `self_distillation/empty_target_batch` is usually false,
-- no unexpected NaNs appear in `teacher_log_probs` or actor loss.
+- no unexpected NaNs appear in teacher targets or actor loss.
 
 If GPU memory is tight, the first knob to lower is:
 
@@ -816,7 +857,7 @@ Paper:
 
 The shortest correct summary of this port is:
 
-> Keep the normal `verl` Megatron RL loop. Identify successful trajectories in each prompt group. Rebuild a teacher prompt from the original question plus a successful attempt and optional feedback. Use the reference model to score the original sampled response under that teacher context. Train the actor against those teacher token probabilities instead of the normal PPO policy loss. Then update the teacher with EMA.
+> Keep the normal `verl` Megatron RL loop. Identify successful trajectories in each prompt group. Rebuild a teacher prompt from the original question plus a successful attempt and optional feedback. Use the reference model to score the original sampled response under that teacher context and return compressed top-k teacher targets. Train the actor against those teacher targets instead of the normal PPO policy loss. Then update the teacher with EMA.
 
 ## Appendix: Sequence-diagram view
 
@@ -838,9 +879,9 @@ sequenceDiagram
     T->>T: mine successful siblings by uid
     T->>T: build teacher reprompt
     T->>Ref: score original response under teacher context
-    Ref-->>T: teacher_log_probs
-    T->>A: actor batch with advantages, old_log_probs, teacher_log_probs, self_distillation_mask
-    A->>A: compute student log_probs
+    Ref-->>T: teacher_topk_indices + teacher_topk_log_probs
+    T->>A: actor batch with advantages, old_log_probs, teacher targets, self_distillation_mask
+    A->>A: compute current student_topk_log_probs on same support
     A->>A: compute SDPO loss
     A-->>T: actor optimizer step finished
     A->>Ref: EMA update teacher weights
