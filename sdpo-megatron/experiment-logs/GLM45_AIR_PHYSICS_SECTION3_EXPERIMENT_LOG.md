@@ -433,3 +433,41 @@ Next step:
 
 - relaunch on the same reserved 4-node cluster with the patched official bridge
 - keep monitoring until the run either reaches the first training step or exposes the next concrete bridge/cache-key issue
+
+### [Resolved Locally] The GLM-Air MTP packing fix needed the Megatron engine flag, not just the model flag
+
+The first attempt to work around GLM-Air's multi-token-prediction (MTP) incompatibility with sequence packing
+disabled only:
+
+- `actor_rollout_ref.model.use_remove_padding=false`
+
+That was not sufficient. The next relaunch still failed in the Megatron actor/ref log-prob path with the same
+assertion:
+
+- `AssertionError: multi token prediction + sequence packing is not yet supported.`
+
+Why the first fix was incomplete:
+
+- the actual `thd` vs `bshd` decision in `megatron_actor.py` is controlled by
+  `self.config.megatron.use_remove_padding`
+- the actor config inherits that from `actor_rollout_ref.actor.megatron.use_remove_padding`
+- the ref config inherits from the actor-side Megatron engine flag as well
+- so the top-level model flag did not change the engine-level packing path used by `compute_log_prob()`
+
+Correct fix:
+
+- keep `actor_rollout_ref.model.use_remove_padding=false`
+- also set:
+  - `actor_rollout_ref.actor.megatron.use_remove_padding=false`
+  - `actor_rollout_ref.ref.megatron.use_remove_padding=false`
+
+Interpretation:
+
+- GLM-Air can still use the same model weights and Megatron setup
+- but actor/ref log-prob computation must run in non-packed `bshd` mode while MTP is enabled
+- the previous failure was a config-plumbing mistake, not evidence that the broader GLM-Air path is blocked
+
+Next step:
+
+- relaunch again on the same reserved 4-node cluster with the engine-level no-packing override
+- keep monitoring until the job either reaches real training steps or exposes the next concrete blocker

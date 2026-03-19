@@ -324,6 +324,7 @@ run: |
       actor_rollout_ref.actor.optim.lr_warmup_steps=10 \
       actor_rollout_ref.actor.megatron.use_mbridge=true \
       actor_rollout_ref.actor.megatron.vanilla_mbridge=false \
+      actor_rollout_ref.actor.megatron.use_remove_padding=false \
       actor_rollout_ref.actor.megatron.tensor_model_parallel_size="${TRAIN_TP_SIZE}" \
       actor_rollout_ref.actor.megatron.pipeline_model_parallel_size="${TRAIN_PP_SIZE}" \
       actor_rollout_ref.actor.megatron.context_parallel_size="${TRAIN_CP_SIZE}" \
@@ -348,6 +349,7 @@ run: |
       actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1 \
       actor_rollout_ref.ref.megatron.use_mbridge=true \
       actor_rollout_ref.ref.megatron.vanilla_mbridge=false \
+      actor_rollout_ref.ref.megatron.use_remove_padding=false \
       actor_rollout_ref.ref.megatron.tensor_model_parallel_size="${TRAIN_TP_SIZE}" \
       actor_rollout_ref.ref.megatron.pipeline_model_parallel_size="${TRAIN_PP_SIZE}" \
       actor_rollout_ref.ref.megatron.context_parallel_size="${TRAIN_CP_SIZE}" \
