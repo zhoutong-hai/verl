@@ -246,3 +246,22 @@ Current interpretation:
 
 - this is a rollout-capacity tuning issue, not a fundamental model-init failure
 - the next relaunch should test whether vLLM can start cleanly with the lower memory target
+
+### [In Progress] Widening rollout-memory headroom and clearing stale queued jobs
+
+The next relaunch did not immediately start training. Instead, the cluster stayed `UP` while the new job remained stuck at:
+
+- `Waiting for task resources on 4 nodes.`
+
+At the same time, the prior failed job still showed the old vLLM startup failure at `VLLM_GPU_MEM_UTIL=0.35`, and Sky's managed-job controller looked flaky enough that queue inspection was unreliable.
+
+Current action:
+
+- widen the rollout-memory margin again by lowering `VLLM_GPU_MEM_UTIL` from `0.28` to `0.25`
+- cancel stale queued jobs on the already-reserved cluster
+- relaunch cleanly on the same 4-node reservation
+
+Current interpretation:
+
+- the underlying GLM-Air bring-up blockers have become narrower
+- the next useful test is a clean relaunch with more rollout headroom, not another configuration redesign
