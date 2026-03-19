@@ -412,7 +412,7 @@ Verified OLMo metric points:
 
 - Megatron variant crashed during worker init with:
   `ModuleNotFoundError: No module named 'megatron.core.distributed.custom_fsdp'`
-- Same issue as smoke test (documented in SDPO_SMOKE_DEBUG_LOG.md).
+- Same issue as smoke test (documented in `SDPO_SMOKE_EXPERIMENT_LOG.md`).
 - `megatron-core==0.15.0` lacks `custom_fsdp`; the default `vanilla_mbridge: true`
   tries to use vanilla `mbridge` which depends on it.
 - Fix: added `vanilla_mbridge: false` to the Megatron config to use `megatron.bridge` instead.

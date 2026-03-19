@@ -297,7 +297,7 @@ sky launch -c verl-olmo3-physics \
 - Current working diagnosis:
   - the present Megatron implementation is not just "weaker than FSDP"; it is optimizing a materially different and less stable objective
   - once the EMA teacher falls behind, the token-level reverse-KL approximation appears to push the model toward ultra-short / empty outputs instead of stable distillation
-  - this is consistent with the design gap already noted in `MEGATRON_SDPO_REVIEW.md`
+  - this is consistent with the design gap already noted in `IMPLEMENTATION_REVIEW.md`
 
 ### [Resolved Locally] Megatron full-logit rerun exposed a response-alignment bug in trainer_ref top-k support
 

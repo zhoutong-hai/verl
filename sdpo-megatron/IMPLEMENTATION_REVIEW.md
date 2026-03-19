@@ -785,6 +785,199 @@ At very large scale, the most likely practical design is:
 
 That would keep the design scalable while making the target-refresh semantics explicit.
 
+## Appendix: Mask Semantics
+
+This note clarifies three masks that are easy to conflate in the Megatron SDPO path:
+
+- `attention_mask`
+- `response_mask`
+- `label_mask`
+
+They are related, but they are **not** interchangeable.
+
+### 1. `attention_mask`
+
+`attention_mask` is the full-sequence validity mask.
+
+It covers:
+
+- prompt / teacher prompt tokens
+- response tokens
+- padding
+
+Example for a sequence of:
+
+- prompt length = 4
+- response window = 6
+- real response tokens = 4
+
+```text
+input_ids       = [P1 P2 P3 P4 | R1 R2 R3 R4 PAD PAD]
+attention_mask  = [ 1  1  1  1 |  1  1  1  1   0   0]
+```
+
+So `attention_mask` answers:
+
+- "Which full-sequence token positions are real?"
+
+### 2. `response_mask`
+
+`response_mask` is the validity mask **only for the response window**.
+
+In the trainer, it is defined by [ray_trainer.py](/Users/zhoutong/code/verl/verl/trainer/ppo/ray_trainer.py#L170) as:
+
+```python
+attention_mask[:, -response_length:]
+```
+
+Using the same example:
+
+```text
+responses       = [R1 R2 R3 R4 PAD PAD]
+response_mask   = [ 1  1  1  1   0   0]
+```
+
+So `response_mask` answers:
+
+- "Inside the fixed response window, which token slots are real response tokens?"
+
+This is the main token-level mask used by PPO/GRPO/SDPO losses.
+
+### 3. `label_mask`
+
+Megatron does next-token scoring on the **preceding sequence position**, so the response token mask has to be shifted left by one sequence position.
+
+That shifted mask is `label_mask` in [megatron_actor.py](/Users/zhoutong/code/verl/verl/workers/actor/megatron_actor.py#L916).
+
+Using the same example:
+
+```text
+sequence slots   = [P1 P2 P3 P4 | R1 R2 R3 R4 PAD PAD]
+responses        =                [R1 R2 R3 R4 PAD PAD]
+response_mask    =                [ 1  1  1  1   0   0]
+label_mask       =             [ 1  1  1  1   0   0]
+```
+
+A more explicit index view:
+
+```text
+token to score     R1  R2  R3  R4
+conditioned on      P4  R1  R2  R3
+```
+
+So `label_mask` answers:
+
+- "Which sequence positions should contribute next-token log-probs for real response tokens?"
+
+### Why this matters in Megatron SDPO
+
+The packed Megatron path computes active sequence positions from `label_mask`, but the SDPO tensors are still organized around response tokens.
+
+That means these counts must agree:
+
+- number of active packed positions from `label_mask`
+- number of valid response tokens from `response_mask`
+
+This is exactly what the runtime assertion in [megatron_actor.py](/Users/zhoutong/code/verl/verl/workers/actor/megatron_actor.py#L1079) is checking.
+
+If they disagree, then the code no longer knows how to align:
+
+- packed full-logit positions
+- response-aligned top-k support tensors
+
+### Why the mismatch is often exactly 1
+
+The most common failure is an off-by-one mismatch such as:
+
+- `89 vs 90`
+- `115 vs 116`
+
+The reason is that only the **first response token** depends on the **last prompt token**.
+
+Every later response token depends on the previous response token, which is already real and valid.
+
+Toy example:
+
+- prompt tokens: `p1 p2 p3`
+- response tokens: `r1 r2`
+
+Megatron wants to score:
+
+```text
+r1 from previous token p3
+r2 from previous token r1
+```
+
+So there should be **2** valid scored response tokens.
+
+If the teacher prompt is **left padded**:
+
+```text
+[PAD PAD p1 p2 p3 | r1 r2]
+```
+
+then:
+
+- predecessor of `r1` is `p3` -> valid
+- predecessor of `r2` is `r1` -> valid
+
+So both counts agree:
+
+- `response_mask` counts `2`
+- packed `label_mask` also yields `2`
+
+If the teacher prompt is **right padded**:
+
+```text
+[p1 p2 p3 PAD PAD | r1 r2]
+```
+
+then:
+
+- predecessor of `r1` is `PAD` -> invalid
+- predecessor of `r2` is `r1` -> valid
+
+So now:
+
+- `response_mask` still counts `2` real response tokens
+- but packed `label_mask` only finds `1` valid scoring position
+
+That produces the characteristic off-by-one:
+
+```text
+response_mask count = 2
+active label positions = 1
+```
+
+This is why prompt padding at the response boundary can cause a mismatch of exactly one active token.
+
+### How SDPO uses the masks
+
+The final SDPO token mask is:
+
+- `response_mask`
+- multiplied by `self_distillation_mask.unsqueeze(1)` if SDPO supervision is enabled for only some samples
+
+See [core_algos.py](/Users/zhoutong/code/verl/verl/trainer/ppo/core_algos.py#L834).
+
+So the roles are:
+
+- `attention_mask`: full sequence validity
+- `response_mask`: valid response tokens
+- `label_mask`: shifted sequence positions used to score those response tokens
+- `self_distillation_mask`: sample-level on/off switch for SDPO
+
+### Why the `student_topk` path needed explicit `response_mask`
+
+In the new `student_topk` Megatron design, support extraction and teacher scoring happen in two stages:
+
+1. actor no-grad prepass computes support on the original rollout batch
+2. ref worker scores the teacher on the reprompted teacher batch
+
+Even though the teacher prefix changes, the valid response-token pattern should stay the same.
+
+So the ref-side scoring path should consume the **same** `response_mask` contract as the actor prepass, rather than reconstructing it indirectly and risking a packed-token mismatch.
+
 ## Appendix: Distillation Target Types
 
 This note clarifies three related but different SDPO target styles:

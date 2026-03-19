@@ -65,7 +65,7 @@ Update this section every time a task completes, a new issue is found, or an old
   - task `9` completed step `3` successfully
   - task `9` exited cleanly and synced W&B run `2xc5al9l`
 - Local workspace state:
-  - uncommitted changes in `SDPO_SMOKE_DEBUG_LOG.md`
+  - uncommitted changes in `SDPO_SMOKE_EXPERIMENT_LOG.md`
 
 ## Debug Notes
 

@@ -150,7 +150,7 @@ Why this matters:
 
 Status:
 - smoke test completed successfully on task `9`
-- see `/Users/zhoutong/code/verl/SDPO_SMOKE_DEBUG_LOG.md` for the detailed issue history
+- see `/Users/zhoutong/code/verl/sdpo-megatron/experiment-logs/SDPO_SMOKE_EXPERIMENT_LOG.md` for the detailed issue history
 
 ### [WIP] 2026-03-15: Full-run monitoring surface expansion
 
