@@ -54,7 +54,7 @@ resources:
 num_nodes: 4
 
 secrets:
-  WANDB_API_KEY:
+  WANDB_API_KEY: ""
 
 config:
   kubernetes:
@@ -137,8 +137,10 @@ run: |
     done
     cd "$VERL_REPO_DIR"
 
+    trainer_logger="['console']"
     if [ -n "${WANDB_API_KEY:-}" ]; then
       python3 -c "import wandb; wandb.login(relogin=True, key='$WANDB_API_KEY')"
+      trainer_logger="['console','wandb']"
     fi
 
     PHYSICS_TRAIN_FILE="${PHYSICS_DATA_DIR}/train.parquet"
@@ -285,7 +287,7 @@ run: |
       custom_reward_function.path="$VERL_REPO_DIR/verl/utils/reward_score/feedback/__init__.py" \
       trainer.project_name="${project_name}" \
       trainer.experiment_name="${EXPERIMENT_NAME}" \
-      trainer.logger="['console','wandb']" \
+      trainer.logger="${trainer_logger}" \
       trainer.log_val_generations=8 \
       trainer.print_val_generations=2 \
       trainer.validation_console_max_chars=1200 \

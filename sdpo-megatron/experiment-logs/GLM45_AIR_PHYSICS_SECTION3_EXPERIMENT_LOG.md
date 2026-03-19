@@ -303,3 +303,9 @@ Next action:
 - raise `VLLM_GPU_MEM_UTIL` to `0.24`
 - tighten `max_model_len` from `12288` to `10240`, matching the current `2048 + 8192` prompt/response budget and the existing `max_reprompt_len=10240`
 - relaunch immediately on the same reserved 4-node cluster
+
+Additional launcher hardening:
+
+- make `WANDB_API_KEY` optional in the SkyPilot YAML (`""` by default) so relaunches do not block on a missing local secret
+- when a key is present, keep the existing `['console', 'wandb']` logger path
+- when a key is absent, fall back to `['console']` so multi-node bring-up can continue and we can still debug from node-local logs
