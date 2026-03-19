@@ -264,7 +264,8 @@ run: |
 
     max_prompt_length=2048
     max_response_length=4096
-    max_model_len=6144
+    rollout_max_model_len=6144
+    actor_max_token_len=8192
     train_batch_size=16
     ppo_mini_batch_size=16
     rollout_n=8
@@ -288,7 +289,7 @@ run: |
         actor_rollout_ref.actor.self_distillation.remove_thinking_from_demonstration=true
         actor_rollout_ref.actor.self_distillation.include_environment_feedback=false
         actor_rollout_ref.actor.self_distillation.environment_feedback_only_without_solution=true
-        actor_rollout_ref.actor.self_distillation.max_reprompt_len=10240
+        actor_rollout_ref.actor.self_distillation.max_reprompt_len=4096
         actor_rollout_ref.actor.self_distillation.is_clip=2.0
       )
     elif [ "$VARIANT" = "grpo_megatron" ]; then
@@ -319,7 +320,7 @@ run: |
       actor_rollout_ref.actor.use_dynamic_bsz=true \
       actor_rollout_ref.actor.ppo_mini_batch_size="${ppo_mini_batch_size}" \
       actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
-      actor_rollout_ref.actor.ppo_max_token_len_per_gpu="${max_model_len}" \
+      actor_rollout_ref.actor.ppo_max_token_len_per_gpu="${actor_max_token_len}" \
       actor_rollout_ref.actor.use_kl_loss=false \
       actor_rollout_ref.actor.optim.lr=1e-5 \
       actor_rollout_ref.actor.optim.lr_warmup_steps=10 \
@@ -351,6 +352,7 @@ run: |
       +actor_rollout_ref.actor.megatron.override_transformer_config.moe_router_dtype=fp32 \
       +actor_rollout_ref.actor.megatron.override_transformer_config.moe_enable_deepep=false \
       actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1 \
+      actor_rollout_ref.ref.log_prob_max_token_len_per_gpu="${actor_max_token_len}" \
       actor_rollout_ref.ref.megatron.use_mbridge=true \
       actor_rollout_ref.ref.megatron.vanilla_mbridge=false \
       actor_rollout_ref.ref.megatron.use_remove_padding=false \
@@ -368,8 +370,8 @@ run: |
       actor_rollout_ref.rollout.tensor_model_parallel_size="${ROLLOUT_TP_SIZE}" \
       actor_rollout_ref.rollout.pipeline_model_parallel_size="${ROLLOUT_PP_SIZE}" \
       actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
-      actor_rollout_ref.rollout.max_num_batched_tokens="${max_model_len}" \
-      actor_rollout_ref.rollout.max_model_len="${max_model_len}" \
+      actor_rollout_ref.rollout.max_num_batched_tokens="${rollout_max_model_len}" \
+      actor_rollout_ref.rollout.max_model_len="${rollout_max_model_len}" \
       actor_rollout_ref.rollout.val_kwargs.top_p=0.95 \
       actor_rollout_ref.rollout.val_kwargs.temperature=0.6 \
       actor_rollout_ref.rollout.val_kwargs.n=16 \

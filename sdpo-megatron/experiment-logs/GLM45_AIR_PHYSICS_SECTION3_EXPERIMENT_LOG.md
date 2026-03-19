@@ -592,3 +592,48 @@ Next step:
 
 - relaunch immediately on the same reserved 4-node cluster with the updated single YAML
 - keep monitoring until the run either reaches stable training steps or exposes the next concrete blocker
+
+### [Applied] SDPO teacher reprompt length must fit the actor/ref token budget
+
+With the conservative memory profile in place, the next relaunch got substantially farther:
+
+- vLLM rollout servers came up on all 4 nodes
+- agent-loop workers launched
+- the trainer entered `Training Progress`
+- the run then failed during Megatron micro-batch rearrangement with:
+  - `AssertionError: max_token_len must be greater than the sequence length. Got max_token_len=6144 and max_seq_len=8096`
+  - stack site:
+    - `verl/utils/seqlen_balancing.py::rearrange_micro_batches`
+
+Interpretation:
+
+- This is a different issue from the earlier actor-update OOM.
+- Rollout is already capped at `6144`, but SDPO teacher scoring uses a reprompted teacher batch:
+  - `teacher_input_ids = teacher_prompt + responses`
+- Our single-YAML launcher was still using:
+  - `actor.ppo_max_token_len_per_gpu = 6144`
+  - `self_distillation.max_reprompt_len = 10240`
+- In practice, one reprompted teacher sequence reached `8096` tokens, so Megatron correctly rejected a
+  micro-batch token cap that was smaller than the actual sequence length.
+
+Applied fix:
+
+- keep the rollout budget conservative:
+  - `rollout.max_model_len = 6144`
+  - `rollout.max_num_batched_tokens = 6144`
+- give the actor/ref update path a separate, larger budget:
+  - `actor.ppo_max_token_len_per_gpu = 8192`
+  - `ref.log_prob_max_token_len_per_gpu = 8192`
+- trim SDPO reprompt growth so teacher batches stay within that budget:
+  - `self_distillation.max_reprompt_len = 4096`
+
+Why this is the right next adjustment:
+
+- It preserves the smaller rollout memory profile that avoided the previous OOM.
+- It recognizes that the SDPO teacher batch is longer than the rollout batch and therefore needs its own token budget.
+- It also puts a tighter bound on teacher reprompt growth instead of simply inflating all sequence limits back toward the earlier OOM regime.
+
+Next step:
+
+- relaunch immediately on the same reserved 4-node cluster with the new actor/ref token budget split
+- keep monitoring until the run reaches real training steps or exposes the next blocker
