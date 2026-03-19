@@ -11,7 +11,7 @@ envs:
   WANDB_EXP_NAME: <placeholder>
   TRAIN_TP_SIZE: "2"
   TRAIN_PP_SIZE: "2"
-  TRAIN_CP_SIZE: "2"
+  TRAIN_CP_SIZE: "1"
   TRAIN_EP_SIZE: "4"
   TRAIN_ETP_SIZE: "1"
   ROLLOUT_TP_SIZE: "8"

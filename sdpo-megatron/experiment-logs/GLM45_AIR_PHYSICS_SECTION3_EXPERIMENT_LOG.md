@@ -471,3 +471,43 @@ Next step:
 
 - relaunch again on the same reserved 4-node cluster with the engine-level no-packing override
 - keep monitoring until the job either reaches real training steps or exposes the next concrete blocker
+
+### [Resolved Locally] Non-packed GLM-Air actor/ref log-prob requires context parallel size 1
+
+After the engine-level no-packing override landed, the next relaunch no longer hit:
+
+- `AssertionError: multi token prediction + sequence packing is not yet supported.`
+
+That confirmed the earlier MTP diagnosis was correct. The run then progressed into the non-packed Megatron
+log-prob path and exposed the next assertion:
+
+- `AssertionError: Context parallel size without seq_pack is not supported`
+
+Where it failed:
+
+- `verl/models/mcore/util.py::preprocess_bshd`
+- the actor/ref log-prob path had switched from packed `thd` to non-packed `bshd`
+- the launcher was still using `context_parallel_size=2`
+
+Interpretation:
+
+- this is not a new model incompatibility
+- it is a direct consequence of the previous MTP fix:
+  - GLM-Air with MTP cannot use packed actor/ref log-prob
+  - current `verl` Megatron `bshd` preprocessing only supports `context_parallel_size=1`
+
+Correct fix:
+
+- keep the no-packing actor/ref path
+- reduce actor/ref training `context_parallel_size` from `2` to `1`
+
+Why this is the right next move:
+
+- it aligns with the actual support matrix in the current `verl` Megatron path
+- it is much smaller-risk than trying to add `bshd + CP` support during bring-up
+- it preserves the main 4-node Megatron training shape while removing only the unsupported CP leg
+
+Next step:
+
+- relaunch immediately on the same reserved 4-node cluster with `TRAIN_CP_SIZE=1`
+- continue monitoring until the run reaches real training steps or exposes the next concrete blocker
