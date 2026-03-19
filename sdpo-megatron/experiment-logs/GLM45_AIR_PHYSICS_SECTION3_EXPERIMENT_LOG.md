@@ -323,3 +323,39 @@ Fix:
 - respect an explicit rollout `max_model_len`
 - only fall back to `hf_config.max_position_embeddings` when the rollout config leaves `max_model_len` unset
 - still clamp explicit values so they never exceed the model's true positional limit
+
+### [Resolved Locally] Disable NCCL NVLS for the 4-node GLM-Air Megatron bring-up
+
+After the explicit `max_model_len` fix landed, the next relaunch got through:
+
+- 4-node Ray startup
+- Megatron actor/ref initialization
+- GLM-Air weight loading
+- vLLM server launch with the intended rollout limits
+
+Verified effective vLLM serve args:
+
+- `--max_model_len 10240`
+- `--max_num_batched_tokens 10240`
+- `--gpu_memory_utilization 0.24`
+
+The next blocker appeared later in distributed startup as repeated NCCL warnings:
+
+- `transport/nvls.cc:598 NCCL WARN Cuda failure 1 'invalid argument'`
+
+Why this is likely the right fix:
+
+- the closest known-good 4-node Megatron launcher in this repo already disables NVLS explicitly:
+  - [verl-sdpo-megatron-llama33-4nodes.yaml](/Users/zhoutong/code/verl/examples/skypilot/verl-sdpo-megatron-llama33-4nodes.yaml)
+- the GLM-Air launcher had not yet set `NCCL_NVLS_ENABLE`
+- the failure surfaced only after the earlier rollout-memory and `max_model_len` issues were already fixed
+
+Fix applied to the GLM-Air launcher:
+
+- add `NCCL_NVLS_ENABLE: "0"` to `envs:`
+- add `export NCCL_NVLS_ENABLE=0` in the `run:` block
+
+Next step:
+
+- relaunch on the same reserved 4-node cluster
+- keep monitoring until the run either reaches the first real rollout/training step or exposes the next concrete blocker
