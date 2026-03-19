@@ -809,3 +809,58 @@ Next step:
 
 - relaunch immediately on the same reserved 4-node cluster with the autograd-safe sharded path
 - keep monitoring until the run either reaches logged training steps or exposes the next concrete blocker
+
+### [Applied] GLM-Air late-step OOM calls for a smaller response/reprompt cap
+
+The autograd-safe tensor-parallel fix resolved the earlier step-2 stall and the run advanced much further:
+
+- step `1` completed
+- step `2` completed
+- the run remained healthy through step `13`
+- then it failed with another actor-update OOM:
+  - `torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 4.04 GiB`
+
+What we checked before changing the budget:
+
+- actual Physics prompt lengths with the GLM tokenizer are short:
+  - `p50 = 251`
+  - `p95 = 325`
+  - `p99 = 338`
+  - `max = 434`
+- so prompt length is not the memory bottleneck
+- the late-step memory pressure is coming from responses + SDPO teacher reprompts
+- at step `13`, the live run still showed:
+  - `response_length/mean = 648.2`
+  - `response_length/max = 2048`
+  - `response_length/clip_ratio = 0.109`
+- compared with the stable Qwen3 Physics Megatron run, GLM-Air is already running with noticeably longer
+  responses and higher clip ratio at a similar early stage
+
+Applied fix:
+
+- reduce the response-side budget again:
+  - `data.max_response_length = 1536` (was `2048`)
+  - `rollout.max_model_len = 3584` (was `4096`)
+  - `rollout.max_num_batched_tokens = 3584` (was `4096`)
+  - `actor.ppo_max_token_len_per_gpu = 5120` (was `6144`)
+  - `ref.log_prob_max_token_len_per_gpu = 5120` (was `6144`)
+  - `self_distillation.max_reprompt_len = 1536` (was `2048`)
+- also enable:
+  - `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`
+  to follow the allocator hint from the OOM traceback and reduce fragmentation risk
+
+W&B note:
+
+- the current GLM-Air launcher is still running `trainer.logger=['console']` because `WANDB_API_KEY` is not set
+  on this cluster, so there is no W&B link for the failed run we are iterating on here
+
+Why this is the right next move:
+
+- the run is now algorithmically correct enough to train for many steps
+- the remaining blocker is headroom during late actor updates, not bring-up correctness
+- prompt lengths are small enough that trimming response / reprompt budgets is the highest-signal, lowest-risk knob
+
+Next step:
+
+- relaunch immediately on the same reserved 4-node cluster with the smaller response/reprompt cap
+- keep monitoring until the run gets through the previous step-13 failure region or exposes the next blocker

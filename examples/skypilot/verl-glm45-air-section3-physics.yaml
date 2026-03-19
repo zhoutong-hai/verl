@@ -41,6 +41,7 @@ envs:
   NCCL_MIN_NCHANNELS: "4"
   NCCL_DEBUG: WARN
   NCCL_DEBUG_SUBSYS: "INIT,GRAPH,TUNING,COLL"
+  PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
 
 resources:
   infra: k8s/hai-training
@@ -194,6 +195,7 @@ run: |
   export TORCH_SYMM_MEM_ALLOW_OVERLAPPING_DEVICES=0
   export VLLM_ENABLE_PREFIX_CACHING=1
   export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
   export RAY_DATA_HOME="${HOME}/verl"
   export HF_HOME=/tmp/huggingface_cache
   export WANDB_PROJECT="$WANDB_PROJECT"
@@ -263,9 +265,9 @@ run: |
     export VLLM_GPU_MEM_UTIL
 
     max_prompt_length=2048
-    max_response_length=2048
-    rollout_max_model_len=4096
-    actor_max_token_len=6144
+    max_response_length=1536
+    rollout_max_model_len=3584
+    actor_max_token_len=5120
     train_batch_size=16
     ppo_mini_batch_size=16
     rollout_n=8
@@ -289,7 +291,7 @@ run: |
         actor_rollout_ref.actor.self_distillation.remove_thinking_from_demonstration=true
         actor_rollout_ref.actor.self_distillation.include_environment_feedback=false
         actor_rollout_ref.actor.self_distillation.environment_feedback_only_without_solution=true
-      actor_rollout_ref.actor.self_distillation.max_reprompt_len=2048
+      actor_rollout_ref.actor.self_distillation.max_reprompt_len=1536
         actor_rollout_ref.actor.self_distillation.is_clip=2.0
       )
     elif [ "$VARIANT" = "grpo_megatron" ]; then
