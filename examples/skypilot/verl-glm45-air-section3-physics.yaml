@@ -41,7 +41,6 @@ envs:
   NCCL_MIN_NCHANNELS: "4"
   NCCL_DEBUG: WARN
   NCCL_DEBUG_SUBSYS: "INIT,GRAPH,TUNING,COLL"
-  PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
 
 resources:
   infra: k8s/hai-training
@@ -195,7 +194,6 @@ run: |
   export TORCH_SYMM_MEM_ALLOW_OVERLAPPING_DEVICES=0
   export VLLM_ENABLE_PREFIX_CACHING=1
   export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
   export RAY_DATA_HOME="${HOME}/verl"
   export HF_HOME=/tmp/huggingface_cache
   export WANDB_PROJECT="$WANDB_PROJECT"

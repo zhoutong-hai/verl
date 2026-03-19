@@ -864,3 +864,38 @@ Next step:
 
 - relaunch immediately on the same reserved 4-node cluster with the smaller response/reprompt cap
 - keep monitoring until the run gets through the previous step-13 failure region or exposes the next blocker
+
+### [Applied] vLLM CuMem allocator rejects expandable segments
+
+The smaller response and reprompt caps were reasonable, but one extra memory tweak backfired immediately on the
+next relaunch.
+
+Observed failure on job `41`:
+
+- vLLM failed during engine startup before training began
+- every rollout worker hit:
+  - `AssertionError: Expandable segments are not compatible with memory pool`
+- traceback source:
+  - `vllm/device_allocator/cumem.py`
+  - `vllm/v1/worker/gpu_worker.py`
+
+Diagnosis:
+
+- the newly added `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` is incompatible with vLLM's CuMem allocator
+  memory pool on this image
+- this is not a GLM-Air model issue and not a trainer bug
+- the reduced token budgets are still useful; only the allocator tweak needs to be reverted
+
+Applied fix:
+
+- remove `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` from the SkyPilot YAML
+- keep the smaller conservative bring-up profile:
+  - `data.max_response_length = 1536`
+  - `rollout.max_model_len = 3584`
+  - `actor/ref max_token_len = 5120`
+  - `self_distillation.max_reprompt_len = 1536`
+
+Next step:
+
+- relaunch immediately on the same reserved cluster without the expandable-segments allocator override
+- continue monitoring for the next failure boundary or a healthy step-10+ training state
