@@ -180,3 +180,45 @@ sky launch -c verl-glm45-air-physics \
   - Megatron-Bridge recognizes the model
   - vLLM appears to support `glm4_moe`
 - The next step is the first real 4-node bring-up launch.
+
+## Bring-up progress
+
+### [Resolved Locally] Hydra override mismatch in the single-YAML SDPO launcher
+
+The first multi-node relaunch failed before model init because the launcher passed:
+
+- `actor_rollout_ref.actor.self_distillation.teacher_scoring_mode=trainer_ref`
+
+against `sdpo_megatron_trainer.yaml`, where this field is not declared in the base YAML struct even though it exists in the dataclass schema.
+
+Fix:
+
+- switch that one override to:
+  - `+actor_rollout_ref.actor.self_distillation.teacher_scoring_mode=trainer_ref`
+
+This allowed the run to pass Hydra config validation and enter real worker bring-up.
+
+### [Resolved Locally] GLM-Air MoE dispatcher mismatch for non-DeepEP bring-up
+
+The next bring-up failure happened during Megatron model construction:
+
+- `AssertionError: DeepEP is not enabled. Please set --moe-enable-deepep to use DeepEP backend.`
+
+Cause:
+
+- the copied Qwen-style override set:
+  - `moe_token_dispatcher_type=flex`
+  - `moe_enable_deepep=false`
+- on this stack, `flex` requires DeepEP
+- but the intended bring-up path is the simpler non-DeepEP route
+
+Fix:
+
+- change the GLM-Air launcher to:
+  - `moe_token_dispatcher_type=alltoall`
+  - keep `moe_enable_deepep=false`
+
+Current interpretation:
+
+- this is a launcher/model-config issue, not a generic GLM-Air incompatibility
+- the next relaunch should test whether the model can initialize cleanly on the non-DeepEP path
