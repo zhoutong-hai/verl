@@ -950,3 +950,27 @@ sky launch -c verl-olmo3-physics \
   - the catastrophic Megatron failure mode is resolved
   - the remaining Megatron-vs-FSDP question is now about quality parity, not correctness collapse
   - both SDPO variants are materially stronger than the current GRPO repro on this Qwen Physics setup
+
+### [Completed] Final outcome for the Qwen Physics campaign
+
+- This is the cleanest small-model conclusion from the Section 3 reproduction work.
+- Strong reference FSDP SDPO benchmark:
+  - run id: `lgteso46`
+  - `val-core/sciknoweval/acc/mean@16 = 0.76171875` at step `305`
+  - W&B: <https://wandb.ai/hippocraticai/olmo3_7b_section3_physics/runs/lgteso46>
+- Corrected Megatron SDPO `student_topk` is now in the same healthy regime instead of collapsing:
+  - live run id: `a6bctqb9`
+  - latest visible `val-core/sciknoweval/acc/mean@16 = 0.72734375`
+  - W&B: <https://wandb.ai/hippocraticai/qwen3_8b_section3_physics/runs/a6bctqb9>
+- Fresh FSDP SDPO repro also lands in the same good regime:
+  - run id: `oeg934te`
+  - latest visible `val-core/sciknoweval/acc/mean@16 = 0.7125`
+  - W&B: <https://wandb.ai/hippocraticai/olmo3_7b_section3_physics/runs/oeg934te>
+- Fresh FSDP GRPO repro is clearly weaker on this setup:
+  - run id: `0wrmxf6g`
+  - latest visible `val-core/sciknoweval/acc/mean@16 = 0.515625`
+  - W&B: <https://wandb.ai/hippocraticai/olmo3_7b_section3_physics/runs/0wrmxf6g>
+- Final takeaway:
+  - the Qwen Physics experiment works end to end
+  - the Megatron SDPO implementation now works for small models after the full-logit correctness fixes
+  - the remaining question is parity quality and future large-scale design, not whether the Megatron implementation is fundamentally broken

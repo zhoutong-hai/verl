@@ -247,3 +247,19 @@ sky launch -c verl-olmo3-physics \
 - Current operational caveat:
   - vLLM falls back to the Transformers implementation for OLMo
   - W&B upload is flaky, so `/root/sky_logs/1--/tasks/run.log` is the primary log source
+
+### [Completed] Final outcome for the OLMo Physics attempt
+
+- This log ended up being most useful as a runtime and logging diagnosis, not as a trustworthy model-comparison result.
+- What was resolved successfully:
+  - validation dump persistence and inline sample previews now work
+  - the OLMo runtime mismatch was cross-validated instead of merely suspected
+- What did not reproduce cleanly:
+  - OLMo Physics SDPO FSDP collapsed early on this stack
+  - OLMo Physics GRPO FSDP stayed alive but remained modest
+- The key blocker is still the runtime mismatch:
+  - `Olmo3ForCausalLM has no vLLM implementation, falling back to Transformers implementation`
+  - node runtime stayed on `vllm 0.10.0`, while `OLMo3` support lands later
+- Practical takeaway:
+  - do not use the OLMo Physics result as the algorithm verdict for SDPO vs Megatron
+  - use the Qwen Physics campaign as the clean small-model benchmark until the OLMo runtime stack is corrected

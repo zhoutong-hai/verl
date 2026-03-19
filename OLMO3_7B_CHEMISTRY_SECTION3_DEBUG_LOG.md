@@ -189,3 +189,16 @@ sky launch -c verl-olmo3-chemistry-sdpo \
 | 20 | 0.0890 | 0.5334 | 0.1224 | 0.1523 | 1307.8 | 2.6182 | 0.2206 |
 | 25 | 0.0518 | 0.2862 | 0.0739 | 0.0430 | 362.3 | 1.7966 | 0.1277 |
 | 30 | 0.0479 | 0.2662 | 0.0659 | 0.0352 | 193.3 | 1.1599 | 0.1324 |
+
+### [Completed] Final outcome for the OLMo Chemistry attempt
+
+- The Chemistry log is now complete enough to treat as a failed reproduction attempt with clear reasons.
+- Observed outcome on the current public Chemistry setup:
+  - SDPO FSDP (`7vohyks1`) starved into the zero-target regime and reached `acc@16 = 0.0`
+  - GRPO FSDP (`g2wwcwfx`) stayed alive but remained weak and decayed after an early bump
+- The two main unresolved parity gaps are still:
+  - OLMo rollout uses the unsupported Transformers fallback under `vllm 0.10.0`
+  - dataset parity is incomplete because the public run here uses `chemistry`, while the paper-aligned OLMo setup used `chemistry_filtered`
+- Practical takeaway:
+  - this Chemistry result should not be used as the final quality judgment of SDPO or Megatron
+  - it is best treated as evidence that OLMo Chemistry reproduction remains blocked on runtime support and dataset parity, not on logging or launcher plumbing
