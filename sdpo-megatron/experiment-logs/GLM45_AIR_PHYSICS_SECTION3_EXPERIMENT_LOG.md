@@ -675,3 +675,55 @@ Next step:
 
 - relaunch immediately on the same reserved 4-node cluster with the CPU-side offloaded-ref EMA refresh
 - keep monitoring until the run reaches real training steps or exposes the next blocker
+
+### [Applied] GLM-Air full-logit SDPO needs a shorter sequence budget on 4xH200
+
+After the CPU-side EMA fix, the next relaunch finally reached real training:
+
+- `training/global_step: 1` completed successfully
+- SDPO health was strong at step 1:
+  - `self_distillation/success_group_fraction = 0.9375`
+  - `self_distillation/reprompt_sample_fraction = 0.9297`
+  - `self_distillation/empty_target_batch = 0.0`
+  - `actor/grad_norm = 0.5986`
+  - `critic/score/mean = 0.7344`
+- then step 2 failed with repeated actor-update OOMs, including:
+  - `torch.OutOfMemoryError: Tried to allocate 4.98 GiB`
+  - `torch.OutOfMemoryError: Tried to allocate 9.00 GiB`
+- stack sites:
+  - `verl/workers/actor/megatron_actor.py::logits_processor`
+  - `logits.clone()`
+  - `tensor_parallel.gather_from_tensor_model_parallel_region(logits)`
+
+Interpretation:
+
+- This is not the earlier setup/EMA/token-budget issue.
+- The run is now failing inside Megatron SDPO full-logit top-k materialization during actor update.
+- On GLM-Air scale, the current bring-up budget is still too long for:
+  - cloning shard logits
+  - gathering full-vocab logits across TP
+  - computing top-k SDPO targets
+- Step 1 confirms the algorithm and runtime path are now correct enough to train, but the sequence budget is still too
+  aggressive for stable multi-step training.
+
+Applied fix:
+
+- reduce the response/update budget to a more conservative bring-up profile:
+  - `data.max_response_length = 2048` (was `4096`)
+  - `rollout.max_model_len = 4096` (was `6144`)
+  - `rollout.max_num_batched_tokens = 4096` (was `6144`)
+  - `actor.ppo_max_token_len_per_gpu = 6144` (was `8192`)
+  - `ref.log_prob_max_token_len_per_gpu = 6144` (was `8192`)
+  - `self_distillation.max_reprompt_len = 2048` (was `4096`)
+
+Why this is the right next adjustment:
+
+- The OOM is tied to full-logit SDPO update memory, which scales strongly with active sequence length.
+- `ppo_micro_batch_size_per_gpu` is already `1`, so shrinking token lengths is the cleanest low-risk lever.
+- This keeps the current corrected Megatron SDPO implementation intact while making the 4-node GLM-Air bring-up
+  feasible.
+
+Next step:
+
+- relaunch immediately on the same reserved 4-node cluster with the shorter sequence budget
+- keep monitoring until the run gets through multiple training steps or exposes the next concrete blocker
