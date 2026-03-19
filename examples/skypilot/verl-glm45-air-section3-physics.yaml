@@ -16,7 +16,7 @@ envs:
   TRAIN_ETP_SIZE: "1"
   ROLLOUT_TP_SIZE: "8"
   ROLLOUT_PP_SIZE: "1"
-  VLLM_GPU_MEM_UTIL: "0.25"
+  VLLM_GPU_MEM_UTIL: "0.22"
   N_GPUS_PER_NODE: "8"
   NNODES: "4"
   CUDA_DEVICE_MAX_CONNECTIONS: "1"
@@ -174,7 +174,7 @@ run: |
 
     max_prompt_length=2048
     max_response_length=8192
-    max_model_len=18944
+    max_model_len=12288
     train_batch_size=32
     ppo_mini_batch_size=32
     rollout_n=8

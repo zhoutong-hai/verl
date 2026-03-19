@@ -265,3 +265,29 @@ Current interpretation:
 
 - the underlying GLM-Air bring-up blockers have become narrower
 - the next useful test is a clean relaunch with more rollout headroom, not another configuration redesign
+
+### [In Progress] GLM-Air now reaches full actor/ref weight load before rollout startup
+
+The next relaunch advanced significantly further:
+
+- setup completed on all 4 nodes
+- Ray head and workers joined
+- W&B login succeeded
+- `main_ppo` and the Megatron worker stack started
+- actor/ref partitions began loading weights successfully
+
+The new failure point remained in vLLM rollout startup, but much later than before:
+
+- `ValueError: Free memory on device (34.51-34.54 / 139.8 GiB) on startup is less than desired GPU memory utilization (0.25, 34.95 GiB).`
+
+Interpretation:
+
+- the previous fixes are holding
+- GLM-Air now gets through model construction and weight loading
+- the remaining blocker is a narrow rollout-memory budget miss, not a structural model-init incompatibility
+
+Current action:
+
+- lower `VLLM_GPU_MEM_UTIL` again from `0.25` to `0.22`
+- reduce the copied rollout/training `max_model_len` buffer from `18944` to `12288`, which is still above the current `2048 + 8192` prompt/response budget
+- relaunch on the same reserved 4-node cluster
