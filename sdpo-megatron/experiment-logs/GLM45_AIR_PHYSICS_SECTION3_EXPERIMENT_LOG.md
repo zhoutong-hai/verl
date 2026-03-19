@@ -222,3 +222,27 @@ Current interpretation:
 
 - this is a launcher/model-config issue, not a generic GLM-Air incompatibility
 - the next relaunch should test whether the model can initialize cleanly on the non-DeepEP path
+
+### [Resolved Locally] vLLM rollout GPU-memory target was too aggressive for colocated GLM-Air bring-up
+
+After the MoE dispatcher fix, the run got through Megatron model construction but failed during vLLM rollout initialization with:
+
+- `ValueError: Free memory on device (...) is less than desired GPU memory utilization (...)`
+
+Observed on startup:
+
+- free memory per rollout device was about `43.6 GiB`
+- requested utilization at `VLLM_GPU_MEM_UTIL=0.35` implied about `48.9 GiB`
+
+Cause:
+
+- the copied rollout-memory target was too aggressive for the colocated 4-node GLM-Air setup after actor/model init had already reserved memory
+
+Fix:
+
+- lower `VLLM_GPU_MEM_UTIL` in the single SkyPilot launcher from `0.35` to `0.28`
+
+Current interpretation:
+
+- this is a rollout-capacity tuning issue, not a fundamental model-init failure
+- the next relaunch should test whether vLLM can start cleanly with the lower memory target
