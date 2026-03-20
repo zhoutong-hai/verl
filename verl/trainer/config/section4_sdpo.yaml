@@ -1,0 +1,52 @@
+defaults:
+  - ppo_trainer
+  - section4_livecodebench_user
+  - _self_
+
+# MAX_PROMPT_LENGTH=2048
+# MAX_RESPONSE_LENGTH=8192
+# MAX_FEEDBACK_LENGTH=8192
+# TEMPLATE_LENGTH=512
+max_model_len: 18944
+
+actor_rollout_ref:
+  actor:
+    ppo_mini_batch_size: 1
+    policy_loss:
+      loss_mode: sdpo
+    self_distillation:
+      teacher_scoring_mode: actor_worker
+      full_logit_distillation: true
+      support_mode: teacher_topk
+      distillation_topk: 20
+      alpha: 1.0
+      success_reward_threshold: 0.5
+      teacher_regularization: ema
+      teacher_update_rate: 0.01
+      dont_reprompt_on_self_success: true
+      remove_thinking_from_demonstration: true
+      include_environment_feedback: true
+      environment_feedback_only_without_solution: true
+      max_reprompt_len: 10240
+      is_clip: 2.0
+    optim:
+      lr: 1e-6
+      lr_warmup_steps: 0
+  rollout:
+    n: 8
+    calculate_log_probs: true
+    val_kwargs:
+      n: 4
+
+algorithm:
+  adv_estimator: grpo
+  norm_adv_by_std_in_grpo: false
+  rollout_correction:
+    rollout_is: token
+    rollout_is_threshold: 2.0
+
+data:
+  train_batch_size: 32
+
+trainer:
+  val_before_train: false

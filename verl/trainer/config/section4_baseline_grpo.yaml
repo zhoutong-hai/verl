@@ -1,0 +1,30 @@
+defaults:
+  - ppo_trainer
+  - section4_livecodebench_user
+  - _self_
+
+# MAX_PROMPT_LENGTH=2048
+# MAX_RESPONSE_LENGTH=8192
+max_model_len: 10240
+
+actor_rollout_ref:
+  actor:
+    ppo_mini_batch_size: 8
+    optim:
+      lr: 1e-6
+      lr_warmup_steps: 0
+  rollout:
+    n: 8
+    calculate_log_probs: true
+    val_kwargs:
+      n: 4
+
+algorithm:
+  adv_estimator: grpo
+  norm_adv_by_std_in_grpo: false
+  rollout_correction:
+    rollout_is: token
+    rollout_is_threshold: 2.0
+
+data:
+  train_batch_size: 32

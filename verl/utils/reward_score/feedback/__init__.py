@@ -1,3 +1,4 @@
+from verl.utils.reward_score.feedback import code
 from verl.utils.reward_score.feedback import mcq
 from verl.utils.reward_score.feedback import tooluse
 
@@ -8,7 +9,9 @@ def compute_score(
     ground_truth: str,
     extra_info: dict = None,
 ) -> dict:
-    if data_source in ["sciknoweval"]:
+    if data_source in ["code", "livecodebench", "humanevalplus"]:
+        results = code.compute_score(solution_str, ground_truth, extra_info, sparse_rewards=True, max_test_cases=None)
+    elif data_source in ["sciknoweval"]:
         results = mcq.compute_score(solution_str, ground_truth)
     elif data_source in ["tooluse"]:
         results = tooluse.compute_score(solution_str, ground_truth)
