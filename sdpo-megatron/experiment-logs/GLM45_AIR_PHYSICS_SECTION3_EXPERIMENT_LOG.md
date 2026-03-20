@@ -1015,3 +1015,72 @@ Next step:
 - sync the runtime-env fix to all 4 GLM-Air pods
 - relaunch on the existing corrected 32-GPU custom Ray cluster
 - keep monitoring until the run either reaches step `30` or surfaces the next concrete blocker
+
+### [Promising] First corrected 4-node GLM-Air SDPO run is training for real
+
+After syncing the runtime-env fix to all 4 pods and relaunching on the existing custom 32-GPU Ray cluster, the
+next run finally crossed the first real training-step boundary.
+
+Current run:
+
+- experiment:
+  - `glm45_air_section3_physics_sdpo_megatron_20260320_004633`
+- W&B:
+  - run id: `yirkyq4x`
+  - URL: <https://wandb.ai/hippocraticai/glm45_air_section3_physics/runs/yirkyq4x>
+- local log:
+  - `/root/sky_logs/manual-glm45-air-20260320_004633.log`
+
+Healthy early signals:
+
+- the run got through:
+  - W&B registration
+  - vLLM startup
+  - multi-node ref-weight load
+  - actor update
+- no repeat of:
+  - the earlier NVLS transport storm
+  - the low-memory logits in-place autograd crash
+
+Observed metrics:
+
+- step `1`
+  - `training/global_step = 1`
+  - `self_distillation/success_group_fraction = 0.9375`
+  - `self_distillation/reprompt_sample_fraction = 0.9296875`
+  - `self_distillation/empty_target_batch = 0.0`
+  - `actor/grad_norm = 0.6426`
+  - `response_length/mean = 660.26`
+  - `response_length/clip_ratio = 0.1016`
+  - `selected_logprob_from_full_abs_diff_mean = 6.71e-07`
+  - `timing_s/step = 302.56`
+
+- step `2`
+  - `training/global_step = 2`
+  - `self_distillation/success_group_fraction = 0.75`
+  - `self_distillation/reprompt_sample_fraction = 0.7265625`
+  - `self_distillation/empty_target_batch = 0.0`
+  - `actor/grad_norm = 0.5435`
+  - `response_length/mean = 957.04`
+  - `response_length/clip_ratio = 0.3281`
+  - `selected_logprob_from_full_abs_diff_mean = 6.69e-07`
+  - `timing_s/step = 259.30`
+
+Current interpretation:
+
+- this is the first GLM-Air Physics SDPO run that is clearly beyond bring-up and into real training
+- the remaining concern is not immediate correctness anymore, but whether response length / clipping stays under
+  control over later steps
+- step time is roughly `4-5` minutes, so reaching `30` steps will require continued long-horizon monitoring
+
+Next step:
+
+- keep the run alive
+- continue monitoring matched SDPO health metrics through later steps
+- specifically watch:
+  - `response_length/mean`
+  - `response_length/clip_ratio`
+  - `success_group_fraction`
+  - `reprompt_sample_fraction`
+  - `empty_target_batch`
+  - the first validation checkpoints
