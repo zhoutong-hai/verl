@@ -1155,3 +1155,70 @@ New run:
 Immediate goal:
 
 - verify whether KL materially slows or prevents the response-length drift that appeared in both no-KL GRPO runs
+
+### [Resolved Locally] KL GRPO rerun hit Megatron ref-logprob unpacking drift
+
+The first KL-anchored GRPO rerun did not reach training. It failed in the Megatron ref path because
+`compute_ref_log_prob()` still unpacked the old 3-value return contract from `compute_log_prob()`,
+while the current Megatron actor now returns a longer tuple.
+
+Failed run:
+
+- experiment:
+  - `glm45_air_section3_physics_grpo_megatron_kl_20260320_213247`
+- W&B:
+  - run id: `u691ahb1`
+  - URL: <https://wandb.ai/hippocraticai/glm45_air_section3_physics/runs/u691ahb1>
+
+Observed error:
+
+- in `verl/workers/megatron_workers.py`
+  - `output, _, _ = self.ref_policy.compute_log_prob(...)`
+- runtime:
+  - `ValueError: too many values to unpack (expected 3)`
+
+Fix:
+
+- updated `verl/workers/megatron_workers.py` to use
+  - `output, *_ = self.ref_policy.compute_log_prob(...)`
+- this makes the ref worker tolerant to the current Megatron actor return contract and avoids another
+  branch-local mismatch between actor and ref codepaths
+
+Commit:
+
+- `5baf4bbd` — `Fix Megatron ref log-prob unpacking for KL`
+
+### [Active] Fresh KL GRPO rerun is past the previous immediate crash boundary
+
+After syncing commit `5baf4bbd` to all four GLM-Air pods, a fresh KL GRPO rerun was started on the
+existing 32-GPU Ray cluster.
+
+Current run:
+
+- experiment:
+  - `glm45_air_section3_physics_grpo_megatron_kl_20260320_145038`
+- W&B:
+  - run id: `w22kusnb`
+  - URL: <https://wandb.ai/hippocraticai/glm45_air_section3_physics/runs/w22kusnb>
+- local log:
+  - `/root/sky_logs/manual-glm45-air-grpo-kl-20260320_145038.log`
+
+Observed current state:
+
+- W&B registration succeeded
+- the 4-node custom Ray cluster is healthy and all 32 GPUs are visible
+- Megatron actor/ref model shards and vLLM rollout servers are up
+- the run is already well past the previous immediate `compute_ref_log_prob()` crash boundary
+
+As of this note:
+
+- no new traceback has appeared
+- `training/global_step` has not been emitted yet
+- the run still appears to be in the long first-step bring-up / first-rollout phase rather than a
+  hard failure
+
+Immediate monitoring goal:
+
+- keep the KL GRPO rerun under observation until it either
+  - reaches real train steps, or
+  - presents a concrete new runtime failure to fix
