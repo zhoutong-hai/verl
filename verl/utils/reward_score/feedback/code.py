@@ -487,17 +487,20 @@ def run_test_std(completion, test_input, test_output, namespace=None):
 def run_test_code(completion, test_input, namespace=None):
     namespace = _create_sandbox_namespace() if namespace is None else namespace
     namespace["__name__"] = "__main__"
-    code_obj = compile(completion, FILENAME, "exec")
-    _exec_with_isolated_locals(code_obj, namespace)
-
+    output = io.StringIO()
+    old_stdout = sys.stdout
     old_stderr = _capture_stderr(namespace)
     try:
+        sys.stdout = output
+        code_obj = compile(completion, FILENAME, "exec")
+        _exec_with_isolated_locals(code_obj, namespace)
         test_code_obj = compile(test_input, TESTS_FILENAME, "exec")
         _exec_with_isolated_locals(test_code_obj, namespace)
         return True, "All tests pass"
     except BaseException as e:
         return False, f"{ERROR_PREFIX}{_short_trace(e)}"
     finally:
+        sys.stdout = old_stdout
         sys.stderr = old_stderr
 
 
