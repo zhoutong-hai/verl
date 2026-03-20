@@ -175,6 +175,15 @@ def _capture_stderr(namespace):
     return old_stderr
 
 
+def _append_debug_output(namespace, text: str) -> None:
+    if not text:
+        return
+    debug_buffer = namespace.get(DEBUG_BUFFER_NAME)
+    if debug_buffer is None:
+        return
+    debug_buffer.write(text)
+
+
 def _create_sandbox_namespace(extra_globals=None):
     """Return a fresh globals dict with restricted builtins for exec/eval."""
     ns = {"__builtins__": _build_restricted_builtins()}
@@ -271,6 +280,19 @@ def _exec_with_isolated_locals(code_obj, globals_ns):
             return len(self._b)
 
     exec(code_obj, globals_ns, _GuardedLocals(globals_ns))
+
+
+def _exec_and_capture_output(code_obj, namespace):
+    output = io.StringIO()
+    old_stdout = sys.stdout
+    old_stderr = _capture_stderr(namespace)
+    try:
+        sys.stdout = output
+        _exec_with_isolated_locals(code_obj, namespace)
+    finally:
+        sys.stdout = old_stdout
+        sys.stderr = old_stderr
+        _append_debug_output(namespace, output.getvalue())
 
 
 def _to_safe_jsonable(value):
@@ -408,7 +430,7 @@ def run_test_func(completion, test_input, test_output, fn_name, namespace=None):
         flags=__future__.annotations.compiler_flag,
         dont_inherit=True,
     )
-    _exec_with_isolated_locals(code_obj, namespace)
+    _exec_and_capture_output(code_obj, namespace)
 
     def _infer_func_name(src, explicit_name):
         try:
@@ -514,7 +536,7 @@ def run_tests_for_one_example(test_cases, completion, send_conn, sparse_rewards,
     globals = _create_sandbox_namespace()
     if context.strip() != "":
         code_obj = compile(context, CONTEXT_FILENAME, "exec")
-        _exec_with_isolated_locals(code_obj, globals)
+        _exec_and_capture_output(code_obj, globals)
 
     reliability_guard()
 
