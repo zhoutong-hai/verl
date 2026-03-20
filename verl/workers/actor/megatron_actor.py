@@ -1148,9 +1148,10 @@ class MegatronPPOActor(BasePPOActor):
                     else:
                         logits_bak = logits
                     # Megatron's vocab_parallel_cross_entropy mutates its input logits in-place
-                    # (subtract max, exponentiate, normalize). Preserve raw shard logits when we
-                    # also need global top-k/full-logit SDPO targets from the same forward pass.
-                    if should_compute_topk and not use_low_memory_teacher_topk and logits_bak.data_ptr() == logits.data_ptr():
+                    # (subtract max, exponentiate, normalize). Preserve raw shard logits whenever
+                    # SDPO top-k targets are computed from this forward pass, including the
+                    # low-memory teacher-support path used for large models like GLM-Air.
+                    if should_compute_topk and logits_bak.data_ptr() == logits.data_ptr():
                         logits_bak = logits.clone()
                     log_probs = vocab_parallel_log_probs_from_logits(logits_bak, label)
                     log_probs = log_probs.masked_fill(~label_mask, 0.0)

@@ -916,3 +916,50 @@ Operational rule for the next relaunch:
 
 This keeps the launcher closer to the Arrakis-style single-YAML pattern and avoids one-off naming state that is
 not needed for the GLM-Air bring-up loop.
+
+### [Applied] Low-memory teacher-topk path still reused mutating logits
+
+Fresh run `43` finally came up cleanly enough to start real trainer initialization and create a W&B run:
+
+- project: `glm45_air_section3_physics`
+- run: `zug797oy`
+- URL: <https://wandb.ai/hippocraticai/glm45_air_section3_physics/runs/zug797oy>
+
+But the first actor update still failed before logging `training/global_step`.
+
+Observed failure:
+
+- actor update died in `WorkerDict.actor_rollout_ref_update_actor()`
+- traceback ended in:
+  - `verl/workers/actor/megatron_actor.py`
+  - `megatron/core/pipeline_parallel/schedules.py`
+- concrete error:
+  - `RuntimeError: one of the variables needed for gradient computation has been modified by an inplace operation`
+  - tensor shape in the error:
+    - `[4, 1536, 75776]`
+
+Diagnosis:
+
+- this is the GLM-Air analogue of the earlier Megatron full-logit bug we fixed for Qwen
+- the new low-memory `teacher_topk` path computes SDPO top-k quantities directly from shard logits
+- later in the same forward pass, `vocab_parallel_log_probs_from_logits(...)` still mutates those logits in place
+- because the SDPO top-k tensors retain autograd references to the raw logits, backward sees a version mismatch and
+  aborts
+
+Applied fix:
+
+- in `verl/workers/actor/megatron_actor.py`, preserve raw shard logits whenever `should_compute_topk` is true,
+  including the low-memory teacher-support path
+- this extends the earlier Qwen safeguard so it also covers GLM-Air's large-model bring-up path
+
+Why this is the right fix:
+
+- the error happens before any sign of response-length collapse or late-step OOM
+- the traceback points directly at backward over tensors produced from the SDPO top-k path
+- the same mutation pattern already explained a major Megatron correctness bug in the Qwen experiments
+
+Next step:
+
+- sync the fix to the reserved 4-node GLM-Air cluster
+- relaunch immediately on the same cluster
+- continue monitoring until the run reaches at least step `30` or the next concrete blocker appears
