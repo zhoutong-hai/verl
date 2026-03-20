@@ -963,3 +963,55 @@ Next step:
 - sync the fix to the reserved 4-node GLM-Air cluster
 - relaunch immediately on the same cluster
 - continue monitoring until the run reaches at least step `30` or the next concrete blocker appears
+
+### [Applied] PPO Ray runtime env was not propagating NCCL NVLS disable to remote actors
+
+After the low-memory logits fix, the next manual relaunch still failed to make real training progress on the
+repaired 32-GPU custom Ray cluster.
+
+Observed behavior:
+
+- the run started and all `8` Megatron actors entered `actor_rollout_ref_init_model`
+- head-node actors had:
+  - `NCCL_NVLS_ENABLE=0`
+- remote worker actors on worker1/worker2/worker3 did **not** have:
+  - `NCCL_NVLS_ENABLE=0`
+- worker logs on non-head pods were flooded with:
+  - `transport/nvls.cc:598 NCCL WARN Cuda failure 1 'invalid argument'`
+- the trainer did not reach `training/global_step`
+
+Diagnosis:
+
+- this was not just a launcher-shell problem
+- `verl.trainer.constants_ppo.get_ppo_ray_runtime_env()` was dropping env vars that already existed in the
+  driver shell
+- that assumption is incorrect for multi-node Ray actors: remote workers do not inherit the driver's shell env
+- result:
+  - head-local actors saw `NCCL_NVLS_ENABLE=0`
+  - remote actors did not
+  - distributed Megatron ref/model init used inconsistent NCCL transport settings across pods
+
+Applied fix:
+
+- in `verl/trainer/constants_ppo.py`:
+  - add the missing transport/runtime envs to `PPO_RAY_RUNTIME_ENV`, including:
+    - `NCCL_NVLS_ENABLE=0`
+    - `VLLM_USE_V1=1`
+    - `VLLM_USE_NCCL_SYMM_MEM=0`
+    - `VLLM_ENABLE_PREFIX_CACHING=1`
+    - `VLLM_WORKER_MULTIPROC_METHOD=spawn`
+    - `TORCH_SYMM_MEM_ALLOW_OVERLAPPING_DEVICES=0`
+  - change `get_ppo_ray_runtime_env()` so that if these envs exist on the driver, their values are copied into
+    `runtime_env["env_vars"]` instead of being removed
+
+Why this is the right fix:
+
+- it addresses the actual propagation boundary used by multi-node Ray actors
+- it explains why the head actors behaved differently from the non-head actors
+- it avoids depending on shell-level inheritance that only works on the local driver node
+
+Next step:
+
+- sync the runtime-env fix to all 4 GLM-Air pods
+- relaunch on the existing corrected 32-GPU custom Ray cluster
+- keep monitoring until the run either reaches step `30` or surfaces the next concrete blocker

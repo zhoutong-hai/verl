@@ -21,11 +21,17 @@ PPO_RAY_RUNTIME_ENV = {
     "env_vars": {
         "TOKENIZERS_PARALLELISM": "true",
         "NCCL_DEBUG": "WARN",
+        "NCCL_NVLS_ENABLE": "0",
         "VLLM_LOGGING_LEVEL": "WARN",
         "VLLM_ALLOW_RUNTIME_LORA_UPDATING": "true",
+        "VLLM_USE_V1": "1",
         # symmetric memory allreduce not work properly in spmd mode
         "VLLM_ALLREDUCE_USE_SYMM_MEM": "0",
+        "VLLM_USE_NCCL_SYMM_MEM": "0",
+        "VLLM_ENABLE_PREFIX_CACHING": "1",
+        "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
         "CUDA_DEVICE_MAX_CONNECTIONS": "1",
+        "TORCH_SYMM_MEM_ALLOW_OVERLAPPING_DEVICES": "0",
         # To prevent hanging or crash during synchronization of weights between actor and rollout
         # in disaggregated mode. See:
         # https://docs.vllm.ai/en/latest/usage/troubleshooting.html?h=nccl_cumem_enable#known-issues
@@ -48,7 +54,10 @@ def get_ppo_ray_runtime_env():
         "env_vars": PPO_RAY_RUNTIME_ENV["env_vars"].copy(),
         **({"working_dir": None} if working_dir is None else {}),
     }
+    # Ray actors on remote nodes do not inherit the driver's shell environment.
+    # Keep these variables in runtime_env, and prefer the driver's current value
+    # when it exists so multi-node workers see the same transport/runtime setup.
     for key in list(runtime_env["env_vars"].keys()):
         if os.environ.get(key) is not None:
-            runtime_env["env_vars"].pop(key, None)
+            runtime_env["env_vars"][key] = os.environ[key]
     return runtime_env
