@@ -288,7 +288,11 @@ run: |
       )
     elif [ "$VARIANT" = "grpo_megatron" ]; then
       config_name='ppo_megatron_trainer.yaml'
-      policy_args=()
+      policy_args=(
+        actor_rollout_ref.actor.use_kl_loss=true
+        actor_rollout_ref.actor.kl_loss_coef=0.001
+        actor_rollout_ref.actor.kl_loss_type=low_var_kl
+      )
     else
       echo "Unknown VARIANT=$VARIANT"
       echo "Expected one of: sdpo_megatron, grpo_megatron"

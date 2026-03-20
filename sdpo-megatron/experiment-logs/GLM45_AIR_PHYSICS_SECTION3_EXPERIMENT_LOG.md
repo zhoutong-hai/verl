@@ -1084,3 +1084,74 @@ Next step:
   - `reprompt_sample_fraction`
   - `empty_target_batch`
   - the first validation checkpoints
+
+### [Observed] GRPO on GLM-Air repeatedly drifts into a long-response collapse regime
+
+After switching the same 4-node GLM-Air setup from SDPO to GRPO, two consecutive manual GRPO runs showed the
+same qualitative failure pattern.
+
+Observed runs:
+
+- first GRPO run:
+  - experiment: `glm45_air_section3_physics_grpo_megatron_20260320_160711`
+  - W&B: <https://wandb.ai/hippocraticai/glm45_air_section3_physics/runs/zel7zqmk>
+- second GRPO run:
+  - experiment: `glm45_air_section3_physics_grpo_megatron_20260320_192545`
+
+Observed pattern:
+
+- both runs start in a reasonable regime
+  - early `acc@16` is non-trivial
+  - gradients are healthy
+  - rollout / actor startup remains stable
+- then response length inflates steadily
+  - first GRPO run:
+    - step `30`: `response_length/mean = 1061.5`, `clip_ratio = 0.28125`
+    - step `58`: `response_length/mean = 1386.64`, `clip_ratio = 0.7578125`
+  - second GRPO run:
+    - step `31`: `response_length/mean = 1162.36`, `clip_ratio = 0.484375`
+    - step `33`: `response_length/mean = 1519.63`, `clip_ratio = 0.96875`
+
+Interpretation:
+
+- this is not the same failure mode as the earlier GLM-Air bring-up crashes
+- the cluster / Megatron / Ray stack is working
+- the failure looks like a GRPO training-dynamics issue on this task:
+  - no teacher correction
+  - no explicit KL anchor
+  - reward appears permissive enough that the policy can drift toward long completions
+
+Most important comparison:
+
+- healthy SDPO reference run:
+  - `glm45_air_section3_physics_sdpo_megatron_20260320_004633`
+  - W&B: <https://wandb.ai/hippocraticai/glm45_air_section3_physics/runs/yirkyq4x>
+  - step `180`: `response_length/mean = 413.16`, `clip_ratio = 0.0625`
+- so the repeated GRPO drift is not explained by model bring-up alone
+
+### [Applied] Added actor-side KL anchor for the next GRPO rerun
+
+To test whether the repeated GRPO collapse is mainly due to the missing reference anchoring, the next rerun adds
+policy KL loss against the reference model.
+
+Applied change:
+
+- in `examples/skypilot/verl-glm45-air-section3-physics.yaml`
+  - for `VARIANT=grpo_megatron` set:
+    - `actor_rollout_ref.actor.use_kl_loss=true`
+    - `actor_rollout_ref.actor.kl_loss_coef=0.001`
+    - `actor_rollout_ref.actor.kl_loss_type=low_var_kl`
+
+New run:
+
+- experiment:
+  - `glm45_air_section3_physics_grpo_megatron_kl_20260320_213247`
+- W&B:
+  - run id: `l5iy0y8n`
+  - URL: <https://wandb.ai/hippocraticai/glm45_air_section3_physics/runs/l5iy0y8n>
+- local log:
+  - `/root/sky_logs/manual-glm45-air-grpo-kl-20260320_213247.log`
+
+Immediate goal:
+
+- verify whether KL materially slows or prevents the response-length drift that appeared in both no-KL GRPO runs
