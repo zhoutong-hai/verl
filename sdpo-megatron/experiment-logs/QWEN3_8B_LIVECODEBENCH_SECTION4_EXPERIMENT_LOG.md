@@ -442,3 +442,49 @@ sky launch -c verl-qwen3-section4-livecodebench \
 - Current monitoring goal:
   - wait for the first real `training/global_step`
   - specifically confirm that the previous reward-worker `MemoryError` at `send_conn.send(...)` does not recur once the reward loop begins
+
+### [Update] Corrected rich-feedback rerun cleared the old crash, but the first `10` steps are not yet convincing
+
+- The corrected rerun no longer reproduces the old reward-worker crash:
+  - no `MemoryError`
+  - no `Traceback`
+  - no early process exit through the first `9` completed training steps
+- Live run under review:
+  - experiment `qwen3_8b_section4_livecodebench_sdpo_fsdp_fixed_feedback_20260321_173144`
+  - W&B run [`3ps8pj3z`](https://wandb.ai/hippocraticai/qwen3_8b_section4_livecodebench/runs/3ps8pj3z)
+  - log `/root/sky_logs/manual-qwen3-section4-fixed-feedback-20260321_173144.log`
+- First-`9`-step behavior:
+  - `feedback_available_fraction` stayed high: roughly `0.91 -> 0.97`
+  - `feedback_used_fraction` stayed high: roughly `0.69 -> 0.84`
+  - `reprompt_sample_fraction` stayed very high: roughly `0.97 -> 1.0`
+  - `success_group_fraction` oscillated in a weak band: `0.15625 -> 0.3125`
+  - `critic/score/mean` stayed low: `0.03125 -> 0.08984`
+  - `response_length/mean` stayed large: about `1073 -> 1557`, later `1269 -> 1327`
+  - `response_length/clip_ratio` stayed non-trivial: about `0.066 -> 0.148`, later `0.078 -> 0.090`
+  - `teacher_preferred_token_fraction` stayed below `0.5`: roughly `0.428 -> 0.471`
+- Best-looking early steps:
+  - step `6`
+    - `success_group_fraction = 0.28125`
+    - `critic/score/mean = 0.08984375`
+    - `response_length/clip_ratio = 0.09765625`
+  - step `9`
+    - `success_group_fraction = 0.3125`
+    - `critic/score/mean = 0.07421875`
+    - `response_length/clip_ratio = 0.08984375`
+- Current concern:
+  - the run appears to enter step-`10` validation, but has not yet emitted the step-`10` metric line
+  - `validation generation end` is present in the log, yet the trainer still sits on step `9` with no post-validation metric flush
+  - so the run is no longer crashing, but it may be stalling or at least progressing very slowly at the first validation boundary
+- Current conclusion:
+  - this is a meaningful correctness improvement over the previous broken evaluator path
+  - however, it is **not yet a convincing reproduction of the Section 4 paper result**
+  - reason:
+    - the rich-feedback path now runs, but early learning remains weak and noisy
+    - response lengths are still too large
+    - the step-`10` validation boundary is not yet cleanly passing
+- Best next debugging direction:
+  - investigate the step-`10` validation stall / flush behavior first
+  - then tighten the experiment profile for a cheaper and more stable early signal:
+    - shorter response / reprompt budgets
+    - less console-heavy validation logging
+    - possibly stricter validation generation limits before rejudging Section 4 quality
