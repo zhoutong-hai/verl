@@ -6,7 +6,7 @@ data:
   val_files: ["${oc.env:LCB_DATA_DIR}/test.parquet"]
   filter_overlong_prompts: true
   max_prompt_length: ${oc.decode:${oc.env:MAX_PROMPT_LENGTH,2048}}
-  max_response_length: ${oc.decode:${oc.env:MAX_RESPONSE_LENGTH,4096}}
+  max_response_length: ${oc.decode:${oc.env:MAX_RESPONSE_LENGTH,8192}}
   shuffle: true
   trust_remote_code: true
   apply_chat_template_kwargs: {"enable_thinking": false}
@@ -54,7 +54,7 @@ reward_model:
 trainer:
   project_name: qwen3_8b_section4_livecodebench
   nnodes: ${oc.decode:${oc.env:NNODES,1}}
-  n_gpus_per_node: ${oc.decode:${oc.env:N_GPUS_PER_NODE,4}}
+  n_gpus_per_node: ${oc.decode:${oc.env:N_GPUS_PER_NODE,8}}
   save_freq: -1
   test_freq: 5
   max_actor_ckpt_to_keep: 1

@@ -4,14 +4,14 @@ defaults:
   - _self_
 
 # MAX_PROMPT_LENGTH=2048
-# MAX_RESPONSE_LENGTH=4096
-# MAX_FEEDBACK_LENGTH=4096
+# MAX_RESPONSE_LENGTH=8192
+# MAX_FEEDBACK_LENGTH=8192
 # TEMPLATE_LENGTH=512
-max_model_len: ${oc.decode:${oc.env:MAX_MODEL_LEN,10240}}
+max_model_len: ${oc.decode:${oc.env:MAX_MODEL_LEN,18944}}
 
 actor_rollout_ref:
   actor:
-    ppo_mini_batch_size: 1
+    ppo_mini_batch_size: ${oc.decode:${oc.env:PPO_MINI_BATCH_SIZE,32}}
     policy_loss:
       loss_mode: sdpo
     self_distillation:
@@ -27,10 +27,10 @@ actor_rollout_ref:
       remove_thinking_from_demonstration: true
       include_environment_feedback: true
       environment_feedback_only_without_solution: true
-      max_reprompt_len: ${oc.decode:${oc.env:MAX_REPROMPT_LEN,6144}}
+      max_reprompt_len: ${oc.decode:${oc.env:MAX_REPROMPT_LEN,10240}}
       is_clip: 2.0
     optim:
-      lr: 1e-6
+      lr: ${oc.decode:${oc.env:ACTOR_LR,1e-5}}
       lr_warmup_steps: 0
   rollout:
     n: 8
