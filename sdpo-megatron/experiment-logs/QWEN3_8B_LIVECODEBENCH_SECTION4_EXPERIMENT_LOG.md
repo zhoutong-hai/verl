@@ -228,6 +228,23 @@ sky launch -c verl-qwen3-section4-livecodebench \
 - Commit:
   - `c2d50037`
 
+### [Resolved] Future launcher defaults now match the allocated node shape better
+
+- The original Section 4 launcher reserved `H200:8` but only exposed GPUs `0,1,2,3` and set `N_GPUS_PER_NODE=4`.
+- For subsequent launches, the setup has been updated to:
+  - use all 8 visible GPUs by default:
+    - `CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7`
+    - `N_GPUS_PER_NODE=8`
+  - keep the current live run unchanged while fixing the default for future relaunches
+
+### [Resolved] Future launcher defaults are more conservative before first validation
+
+- To reduce pre-validation cost/risk on new relaunches, the default Section 4 context limits were tightened:
+  - `MAX_RESPONSE_LENGTH=4096`
+  - `MAX_MODEL_LEN=10240`
+  - `MAX_REPROMPT_LEN=6144`
+- These values are now environment-driven so they can still be overridden back to longer paper-faithful settings if needed.
+
 ### [Note] Previous job `21` was manually interrupted during investigation
 
 - While probing the old run for a Python stack, a manual signal terminated job `21`.

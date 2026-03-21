@@ -4,10 +4,10 @@ defaults:
   - _self_
 
 # MAX_PROMPT_LENGTH=2048
-# MAX_RESPONSE_LENGTH=8192
-# MAX_FEEDBACK_LENGTH=8192
+# MAX_RESPONSE_LENGTH=4096
+# MAX_FEEDBACK_LENGTH=4096
 # TEMPLATE_LENGTH=512
-max_model_len: 18944
+max_model_len: ${oc.decode:${oc.env:MAX_MODEL_LEN,10240}}
 
 actor_rollout_ref:
   actor:
@@ -27,7 +27,7 @@ actor_rollout_ref:
       remove_thinking_from_demonstration: true
       include_environment_feedback: true
       environment_feedback_only_without_solution: true
-      max_reprompt_len: 10240
+      max_reprompt_len: ${oc.decode:${oc.env:MAX_REPROMPT_LEN,6144}}
       is_clip: 2.0
     optim:
       lr: 1e-6
