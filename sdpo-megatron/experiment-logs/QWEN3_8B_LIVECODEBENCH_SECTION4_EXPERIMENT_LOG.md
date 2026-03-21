@@ -70,37 +70,44 @@ sky launch -c verl-qwen3-section4-livecodebench \
 - inline validation samples in `run.log`
 - validation dumps under `/hai/zhoutong/section4_livecodebench_assets/validation_generations/`
 
-## Current Status Snapshot (2026-03-21 00:49 PDT)
+## Current Status Snapshot (2026-03-21 01:36 PDT)
 
 - The current live Section 4 SDPO run is:
   - cluster `verl-qwen3-section4-livecodebench`
-  - job id `62`
-  - W&B run [`4e7m3pym`](https://wandb.ai/hippocraticai/qwen3_8b_section4_livecodebench/runs/4e7m3pym)
+  - job id `150`
+  - W&B run [`aev2yvmk`](https://wandb.ai/hippocraticai/qwen3_8b_section4_livecodebench/runs/aev2yvmk)
   - queue status `RUNNING`
-- The path is now verified through:
+- The current launcher path is verified through:
   - cluster launch
   - remote repo clone / install
   - shared-data bootstrap on `/hai`
   - Ray startup
-  - FSDP actor/ref + vLLM initialization
+  - FSDP actor/ref + vLLM initialization on 4 GPUs
   - W&B run creation
-  - multi-step SDPO training progress on the patched rich-feedback path
+  - rollout generation
+  - actor update
+  - first real SDPO step
 - Latest observed trainer progress:
-  - `training/global_step: 5`
-  - `Training Progress:   4%|▍         | 5/120`
-  - latest logged epoch: `1`
-- Latest observed step-5 metrics:
+  - `training/global_step: 1`
+  - `Training Progress:   0%|          | 0/120` followed by the first full step log line
+- Latest observed step-1 metrics from job `150`:
+  - `self_distillation/feedback_available_fraction: 0.93359375`
   - `self_distillation/feedback_used_fraction: 0.75`
-  - `critic/score/mean: 0.05859375`
-  - `response_length/mean: 1922.78125`
-  - `timing_s/reward: 177.9668`
-  - `timing_s/step: 352.3154`
+  - `self_distillation/reprompt_sample_fraction: 0.984375`
+  - `critic/score/mean: 0.06640625`
+  - `response_length/mean: 999.046875`
+  - `timing_s/gen: 56.0905`
+  - `timing_s/reward: 522.9072`
+  - `timing_s/update_actor: 72.7139`
+  - `timing_s/step: 660.8877`
+  - `perf/throughput: 151.29`
 - Current maturity assessment:
-  - this is a stable multi-step bring-up run
+  - this relaunch is back in a healthy end-to-end bring-up state
+  - it has cleared the first-step correctness bar on the corrected 4-GPU setup
   - it is still pre-validation and should not yet be treated as a completed Section 4 result
 - Important hardware note:
-  - the current launcher reserves an `H200:8` node but runs on GPUs `0,1,2,3` only
-  - throughput/cost comparisons should be interpreted as a 4-GPU-on-8-GPU-node setup unless the launcher is changed
+  - the cluster shape is still `H200:8`
+  - the current Section 4 launcher is intentionally back on 4 GPUs to match the upstream setup and avoid the silent pre-step stall seen on the 8-GPU attempt
 
 ## Debug Notes
 
@@ -314,3 +321,73 @@ sky launch -c verl-qwen3-section4-livecodebench \
   - the job is in a good multi-step bring-up state now
   - it is making multi-step training progress on the same cluster
   - it is still too early to claim validation success or experiment maturity
+
+### [Resolved] 8-GPU relaunch `102` silently stalled before the first step
+
+- After the launcher was changed to use all 8 visible GPUs by default, the same-cluster relaunch was:
+  - cluster `verl-qwen3-section4-livecodebench`
+  - job id `102`
+  - W&B run [`xrar3y2s`](https://wandb.ai/hippocraticai/qwen3_8b_section4_livecodebench/runs/xrar3y2s)
+- What was verified on-cluster:
+  - the remote config really did switch to:
+    - `CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7`
+    - `N_GPUS_PER_NODE=8`
+  - 8 actor init workers came up
+  - 8 vLLM servers came up
+  - rollout generation completed
+- Failure pattern:
+  - `run.log` stopped advancing after the initial `Training Progress:   0%|          | 0/120`
+  - W&B never reported `training/global_step`
+  - the queue stayed `RUNNING`, but the run never emitted the first real step
+- Interpretation:
+  - this looked like a silent post-generation / pre-step stall on the 8-GPU path
+  - it was not a clean crash, but it also did not satisfy the bar for a healthy run
+
+### [Resolved] Launcher was reverted to the upstream 4-GPU Section 4 shape
+
+- The copied upstream Section 4 script in `../SDPO` uses:
+  - `GPUS_PER_NODE=4`
+- Since the 8-GPU attempt stalled and the known-good earlier runs were also 4-GPU, the launcher was corrected back to:
+  - `N_GPUS_PER_NODE=4`
+  - `CUDA_VISIBLE_DEVICES=0,1,2,3`
+- The tighter context limits were kept:
+  - `MAX_RESPONSE_LENGTH=4096`
+  - `MAX_MODEL_LEN=10240`
+  - `MAX_REPROMPT_LEN=6144`
+- Commit:
+  - `dc47b47d` `Revert Section 4 launcher to 4 GPUs`
+
+### [Resolved] Same-cluster relaunch `150` reached the first real SDPO step
+
+- Relaunched on the same cluster after the 4-GPU revert:
+  - cluster `verl-qwen3-section4-livecodebench`
+  - job id `150`
+- W&B run:
+  - [`aev2yvmk`](https://wandb.ai/hippocraticai/qwen3_8b_section4_livecodebench/runs/aev2yvmk)
+- Verified on-cluster before the first step:
+  - only 4 `WorkerDict.actor_rollout_ref_init_model` workers were active
+  - only 4 vLLM servers were launched
+  - the config dump showed:
+    - `max_prompt_length: 2048`
+    - `max_response_length: 4096`
+    - `max_model_len: 10240`
+    - `max_reprompt_len: 6144`
+    - effective trainer `n_gpus_per_node: 4`
+- Additional live-health signal before the first metric flush:
+  - the run progressed into `ray::WorkerDict.actor_rollout_ref_update_actor`
+  - this confirmed the job had moved beyond rollout generation and into the real actor update path
+- First-step metrics from job `150`:
+  - `training/global_step: 1`
+  - `self_distillation/feedback_available_fraction: 0.93359375`
+  - `self_distillation/feedback_used_fraction: 0.75`
+  - `self_distillation/reprompt_sample_fraction: 0.984375`
+  - `critic/score/mean: 0.06640625`
+  - `response_length/mean: 999.046875`
+  - `timing_s/gen: 56.0905`
+  - `timing_s/reward: 522.9072`
+  - `timing_s/update_actor: 72.7139`
+  - `timing_s/step: 660.8877`
+  - `perf/throughput: 151.29`
+- Current interpretation:
+  - the corrected 4-GPU relaunch is back in a good running state
+  - the 8-GPU regression was avoided without giving up the tighter context defaults
