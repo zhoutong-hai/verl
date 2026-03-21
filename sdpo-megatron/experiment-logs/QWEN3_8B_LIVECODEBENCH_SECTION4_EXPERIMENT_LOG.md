@@ -274,3 +274,25 @@ sky launch -c verl-qwen3-section4-livecodebench \
   - the run is no longer blocked on bring-up
   - it has cleared the end-to-end correctness bar through the first real update
   - the remaining watch item is forward progress beyond step 1, not a known crash
+
+### [Resolved] Forward progress beyond step 1 is confirmed
+
+- Additional monitoring after the first step showed that the run continued rather than stalling.
+- The trainer advanced to:
+  - `training/global_step: 2`
+  - `Training Progress:   2%|▏         | 2/120`
+- Step-2 metrics:
+  - `self_distillation/feedback_available_fraction: 0.9609375`
+  - `self_distillation/feedback_used_fraction: 0.8125`
+  - `self_distillation/reprompt_sample_fraction: 0.984375`
+  - `critic/score/mean: 0.0390625`
+  - `response_length/mean: 1860.8046875`
+  - `timing_s/gen: 98.5985`
+  - `timing_s/reward: 324.1183`
+  - `timing_s/update_actor: 71.9843`
+  - `timing_s/step: 504.7002`
+  - `perf/throughput: 307.77`
+- Updated interpretation:
+  - the job is in a genuinely good running state now
+  - it is making multi-step training progress on the same cluster
+  - the remaining work is ordinary experiment monitoring, not unblock/debug bring-up
