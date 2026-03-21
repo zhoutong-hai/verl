@@ -391,3 +391,34 @@ sky launch -c verl-qwen3-section4-livecodebench \
 - Current interpretation:
   - the corrected 4-GPU relaunch is back in a good running state
   - the 8-GPU regression was avoided without giving up the tighter context defaults
+
+### [Resolved] Live Section 4 run advanced to step `29`, exposing a rich-feedback evaluator bug
+
+- Newer relaunches on the same cluster progressed well past the earlier step-1/step-5 bring-up bar:
+  - latest verified Sky job before this handoff:
+    - cluster `verl-qwen3-section4-livecodebench`
+    - job id `176`
+    - queue status `SUCCEEDED`
+- The live tail reached:
+  - `training/global_step: 29`
+  - `self_distillation/feedback_available_fraction: 0.9609375`
+  - `self_distillation/feedback_used_fraction: 0.8125`
+  - `response_length/mean: 1358.87109375`
+  - `timing_s/reward: 885.9562`
+  - `timing_s/step: 1007.3362`
+- The concrete failure surfaced inside the rich-feedback reward worker:
+  - `MemoryError` at `send_conn.send((results, outputs))` in [code.py](/Users/zhoutong/code/verl/verl/utils/reward_score/feedback/code.py)
+- Root-cause review against the local upstream `SDPO` checkout showed two real drifts in the copied evaluator:
+  - the local port had simplified sparse evaluation into a single subprocess returning `(results, outputs)` for all tests, which could build a very large payload before any truncation
+  - the local sparse path also stopped after the first failed test, which weakened the per-test environment-feedback signal compared with the upstream Section 4 implementation
+- Corrective change taken:
+  - restore the upstream per-test record flow and LeetCode-style feedback formatting in [code.py](/Users/zhoutong/code/verl/verl/utils/reward_score/feedback/code.py)
+  - keep the local stdout-capture fixes on top
+  - additionally truncate `actual` / `debug` payloads before sending them through the multiprocessing pipe
+- Rationale:
+  - this keeps the paper-faithful rich-feedback semantics
+  - and also removes the transport-side OOM that was corrupting long feedback cases
+- Next action after this fix:
+  - commit and push the evaluator patch
+  - relaunch the same Section 4 SDPO experiment on the existing cluster
+  - re-check first-step and multi-step progress on the corrected rich-feedback path

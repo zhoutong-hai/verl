@@ -526,6 +526,15 @@ def run_test_code(completion, test_input, namespace=None):
         sys.stderr = old_stderr
 
 
+def _truncate_transport_text(value, max_chars=4000):
+    if value is None:
+        return None
+    text = str(value)
+    if len(text) > max_chars:
+        return text[:max_chars] + "...<truncated>..."
+    return text
+
+
 def run_tests_for_one_example(test_cases, completion, send_conn, sparse_rewards, test_idx):
     """Run a single test case (test_idx) for one completion"""
 
@@ -539,64 +548,280 @@ def run_tests_for_one_example(test_cases, completion, send_conn, sparse_rewards,
         _exec_and_capture_output(code_obj, globals)
 
     reliability_guard()
+    old_stderr = _capture_stderr(globals)
 
-    start = time.time()
-    timed_out = False
-
-    if test_idx is None:
-        test_inputs = test_cases["inputs"]
-        test_outputs = test_cases["outputs"]
-    else:
-        test_inputs = [test_cases["inputs"][test_idx]]
-        test_outputs = [test_cases["outputs"][test_idx]]
-
-    results = []
-    outputs = []
+    time_elapsed = float("inf")
+    test_input = test_cases["inputs"][test_idx]
+    test_output = test_cases["outputs"][test_idx]
+    output_value = ""
+    test_debug = ""
 
     try:
-        for test_input, test_output in zip(test_inputs, test_outputs):
-            time_remaining = (
-                DEFAULT_TIMEOUT
-                if "time_limit" not in test_cases
-                else int(TIMEOUT_SCALER * float(test_cases["time_limit"]) + DEFAULT_TIMEOUT)
-            )
-
-            if time.time() - start > time_remaining:
-                timed_out = True
-                break
-
-            namespace = copy.deepcopy(globals)
-
+        time_start = time.time()
+        try:
             if test_type == "functional":
-                res, output = run_test_func(completion, test_input, test_output, fn_name, namespace=namespace)
+                passed, output_value = run_test_func(
+                    completion, copy.deepcopy(test_input), copy.deepcopy(test_output), fn_name, namespace=globals
+                )
             elif test_type == "stdin":
-                res, output = run_test_std(completion, test_input, test_output, namespace=namespace)
-            elif test_type == "assert":
-                res, output = run_test_code(completion, test_input, namespace=namespace)
+                test_output = test_output.strip()
+                if test_output.endswith("-"):
+                    test_output = test_output[: test_output.rfind("-")].rstrip()
+                passed, output_value = run_test_std(
+                    completion, copy.deepcopy(test_input), copy.deepcopy(test_output), namespace=globals
+                )
+            elif test_type in ("code", "assert"):
+                passed, output_value = run_test_code(completion, copy.deepcopy(test_input), namespace=globals)
             else:
-                raise ValueError(f"Unknown test type: {test_type}")
+                raise ValueError(f"Invalid test type: {test_type}")
+        except BaseException as e:
+            passed = False
+            output_value = f"{ERROR_PREFIX}{_short_trace(e)}"
+        finally:
+            time_elapsed = time.time() - time_start
 
-            debug_buffer = namespace[DEBUG_BUFFER_NAME].getvalue()
-            if debug_buffer.strip():
-                output = f"{output}\n\n[debug]\n{debug_buffer}" if output else f"[debug]\n{debug_buffer}"
+        if DEBUG_BUFFER_NAME in globals:
+            test_debug = globals[DEBUG_BUFFER_NAME].getvalue()
 
-            results.append(res)
-            outputs.append(output)
+        record = {
+            "test_idx": test_idx,
+            "input": test_input,
+            "expected": test_output,
+            "actual": _truncate_transport_text(output_value),
+            "passed": passed,
+            "debug": _truncate_transport_text(test_debug),
+            "time": time_elapsed,
+        }
 
-            if sparse_rewards and not res:
-                break
-    except BaseException as e:
-        results = [False]
-        outputs = [f"{OUTER_ERROR_PREFIX}{_short_trace(e)}"]
-
-    if timed_out:
-        results = [False]
-        outputs = [TIMEOUT]
-
-    if send_conn is not None:
-        send_conn.send((results, outputs))
+        try:
+            send_conn.send(record)
+        except Exception:
+            pass
+    except BaseException as outer_e:
+        record = {
+            "test_idx": test_idx,
+            "input": test_input,
+            "expected": test_output,
+            "actual": f"{OUTER_ERROR_PREFIX}{_short_trace(outer_e)}",
+            "passed": False,
+            "debug": "",
+            "time": float("inf"),
+        }
+        send_conn.send(record)
+    finally:
+        sys.stderr = old_stderr
         send_conn.close()
-    return results, outputs
+
+
+def extract_code(response):
+    blocks = re.findall(r"```(\w*)\n(.*?)```", response, re.DOTALL)
+    if not blocks:
+        return None
+    return max((code for _, code in blocks), key=len)
+
+
+def format_test_feedback(
+    records,
+    was_truncated=False,
+    max_tests_to_show=2,
+    sort_test_cases_by_length=True,
+    max_length=2000,
+    max_input_chars=250,
+    max_input_lines=8,
+    max_expected_chars=250,
+    max_actual_chars=250,
+    max_debug_lines=10,
+    max_debug_line_chars=300,
+):
+    if not records:
+        return "No test execution information available."
+
+    def _truncate_str(value, max_chars):
+        if not isinstance(value, str):
+            value = str(value)
+        if max_chars is not None and len(value) > max_chars:
+            return value[:max_chars] + "..."
+        return value
+
+    failing = [record for record in records if not record["passed"]]
+
+    def _first(predicate):
+        for record in records:
+            try:
+                if predicate(record):
+                    return record
+            except Exception:
+                continue
+        return None
+
+    selected = (
+        _first(lambda record: isinstance(record.get("actual"), str) and str(record.get("actual")).startswith(ERROR_PREFIX))
+        or _first(lambda record: record.get("actual") == TIMEOUT)
+        or _first(lambda record: record.get("actual") == INCORRECT_FORMAT)
+    )
+
+    if selected is not None:
+        failing = [selected]
+    else:
+        if sort_test_cases_by_length:
+            failing = sorted(failing, key=lambda record: len(str(record["input"])) + len(str(record["actual"])))
+        if max_tests_to_show is not None:
+            failing = failing[: int(max_tests_to_show)]
+
+    if not failing:
+        return ""
+
+    parts = []
+
+    def _render_input_block(title, inp):
+        parts.append(title)
+        if inp is None:
+            return
+        if isinstance(inp, dict):
+            for key, value in inp.items():
+                parts.append(f"{key} = {_truncate_str(value, max_input_chars)}")
+        else:
+            text = str(inp)
+            lines = text.splitlines()
+            shown = lines[:max_input_lines]
+            for line in shown:
+                parts.append(_truncate_str(line, max_input_chars))
+            if len(lines) > max_input_lines:
+                parts.append(f"... ({len(lines) - max_input_lines} more lines)")
+
+    def _render_debug_block(debug_text):
+        debug_text = (debug_text or "").strip()
+        if not debug_text:
+            return
+        parts.append("")
+        parts.append("Debug Output")
+        debug_lines = debug_text.split("\n")
+        limit = int(max_debug_lines) if max_debug_lines is not None else None
+        for line in debug_lines[:limit]:
+            parts.append(_truncate_str(line, max_debug_line_chars))
+        if max_debug_lines is not None and len(debug_lines) > int(max_debug_lines):
+            parts.append(f"... ({len(debug_lines) - int(max_debug_lines)} more lines)")
+
+    for record in failing:
+        test_idx = record["test_idx"] + 1
+        actual = record["actual"]
+        expected = record["expected"]
+        stdin = record["input"]
+        debug_text = record["debug"] or ""
+
+        is_error = isinstance(actual, str) and actual.startswith(ERROR_PREFIX)
+        is_timeout = actual == TIMEOUT
+        is_incorrect_format = actual == INCORRECT_FORMAT
+
+        if is_error:
+            parts.append("Runtime Error")
+            parts.append(actual[len(ERROR_PREFIX) :])
+            parts.append("")
+            _render_input_block("Last Executed Input", stdin)
+            _render_debug_block(debug_text)
+        elif is_timeout:
+            parts.append("Time Limit Exceeded")
+            parts.append("")
+            _render_input_block("Last Executed Input", stdin)
+            _render_debug_block(debug_text)
+        elif is_incorrect_format:
+            if was_truncated:
+                parts.append(
+                    "Truncated Attempt: Your previous response was too long and truncated because it reached the maximum response length. Try again with a shorter response."
+                )
+            else:
+                parts.append("Incorrect Format: Put your code inside a ```python ... ``` block.")
+        else:
+            parts.append(f"Test Case {test_idx}: Wrong Answer")
+            parts.append("")
+            _render_input_block("Input", stdin)
+            parts.append("")
+            parts.append("Output")
+            parts.append(_truncate_str(actual, max_actual_chars))
+            if expected is not None:
+                parts.append("")
+                parts.append("Expected")
+                parts.append(_truncate_str(expected, max_expected_chars))
+            _render_debug_block(debug_text)
+
+        parts.append("")
+
+    result = "\n".join(parts).rstrip()
+    if len(result) > max_length:
+        result = result[:max_length]
+    return result
+
+
+def run_tests(test_cases: dict, solution, sparse_rewards, max_test_cases):
+    completion = extract_code(solution)
+    if completion is None:
+        return [
+            {
+                "test_idx": 0,
+                "input": None,
+                "expected": None,
+                "actual": INCORRECT_FORMAT,
+                "passed": False,
+                "debug": "",
+                "time": float("inf"),
+            }
+        ]
+
+    num_test_cases = min(max_test_cases, len(test_cases["inputs"])) if max_test_cases else len(test_cases["inputs"])
+    timeout_per_test_case = float(test_cases["time_limit"]) if test_cases["time_limit"] is not None else DEFAULT_TIMEOUT
+
+    records = []
+    process_data = []
+
+    for test_idx in range(num_test_cases):
+        parent_conn, child_conn = multiprocessing.Pipe(duplex=False)
+        process = multiprocessing.Process(
+            target=run_tests_for_one_example,
+            args=(test_cases, completion, child_conn, sparse_rewards, test_idx),
+        )
+        process.start()
+        child_conn.close()
+        process_data.append({"process": process, "parent_conn": parent_conn})
+
+    start_time = time.time()
+    for test_idx, data in enumerate(process_data):
+        process = data["process"]
+        parent_conn = data["parent_conn"]
+
+        timeout_this_test = max(0, timeout_per_test_case * TIMEOUT_SCALER + 1 - (time.time() - start_time))
+        if parent_conn.poll(timeout_this_test):
+            try:
+                result = parent_conn.recv()
+            except Exception as e:
+                result = {
+                    "test_idx": test_idx,
+                    "input": test_cases["inputs"][test_idx],
+                    "expected": test_cases["outputs"][test_idx],
+                    "actual": f"Process Error: {_short_trace(e)}",
+                    "passed": False,
+                    "debug": "",
+                    "time": float("inf"),
+                }
+        else:
+            result = {
+                "test_idx": test_idx,
+                "input": test_cases["inputs"][test_idx],
+                "expected": test_cases["outputs"][test_idx],
+                "actual": TIMEOUT,
+                "passed": False,
+                "debug": "",
+                "time": float("inf"),
+            }
+
+        records.append(result)
+
+        process.join(timeout=0)
+        if process.is_alive():
+            process.kill()
+            process.join()
+
+    assert len(records) == num_test_cases
+    return records
 
 
 def _run_tests_timeout(test_cases, completion, sparse_rewards, test_idx):
@@ -646,24 +871,11 @@ def _normalize_feedback(output: str) -> str:
 
 
 def compute_score(completion, test_cases, extra_info=None, sparse_rewards=True, max_test_cases=None):
-    """
-    Evaluate code and return a score dict with optional textual feedback.
+    split = extra_info["split"] if extra_info is not None else "train"
+    was_truncated = extra_info.get("truncated", False) if extra_info is not None else False
 
-    This mirrors the rich-feedback SDPO path from the sibling SDPO repo.
-    """
-    del extra_info
-
-    code_match = re.search(r"```python\s*(.*?)```", completion, re.DOTALL)
-    if code_match:
-        completion = code_match.group(1).strip()
-
-    if completion.strip() == "":
-        return {
-            "score": 0.0,
-            "acc": 0.0,
-            "incorrect_format": 1,
-            "feedback": INCORRECT_FORMAT,
-        }
+    if split == "test":
+        sparse_rewards = True
 
     try:
         if not isinstance(test_cases, dict):
@@ -672,38 +884,46 @@ def compute_score(completion, test_cases, extra_info=None, sparse_rewards=True, 
         return {
             "score": 0.0,
             "acc": 0.0,
-            "incorrect_format": 1,
-            "feedback": "Failed to parse test cases",
+            "pred": "",
+            "incorrect_format": 0,
+            "error_in_test_cases": 1,
+            "timed_out": 0,
+            "truncated": 1 if was_truncated else 0,
+            "truncated_and_missing_answer": 1 if was_truncated else 0,
+            "feedback": "Failed to parse ground truth test cases.",
         }
 
-    if max_test_cases is not None:
-        limited_cases = copy.deepcopy(test_cases)
-        limited_cases["inputs"] = limited_cases["inputs"][:max_test_cases]
-        limited_cases["outputs"] = limited_cases["outputs"][:max_test_cases]
-        test_cases = limited_cases
+    records = run_tests(
+        test_cases=test_cases,
+        solution=completion,
+        sparse_rewards=sparse_rewards,
+        max_test_cases=max_test_cases if split != "test" else None,
+    )
 
-    results, outputs = _run_tests_timeout(test_cases, completion, sparse_rewards=sparse_rewards, test_idx=None)
+    correct_answers = [1.0 if record["passed"] else 0.0 for record in records]
+    predictions = str([record["actual"] for record in records])[-5000:]
+    accuracy = float(np.mean(correct_answers)) if len(correct_answers) > 0 else 0.0
 
-    passed = [bool(x) for x in results if isinstance(x, (bool, np.bool_))]
-    if len(passed) == 0:
-        score = 0.0
-    elif sparse_rewards:
-        score = float(all(passed))
+    if sparse_rewards:
+        reward = 1.0 if accuracy == 1.0 else 0.0
     else:
-        score = float(np.mean(passed))
+        reward = accuracy
 
-    feedback = ""
-    if score < 1.0:
-        failing_outputs = []
-        for idx, (res, output) in enumerate(zip(results, outputs)):
-            if not res:
-                prefix = f"Test {idx + 1}: "
-                failing_outputs.append(prefix + _normalize_feedback(output))
-        feedback = "\n".join([line for line in failing_outputs if line.strip()][:5]).strip()
+    incorrect_format = (len(records) == 1) and (not records[0]["passed"]) and (records[0]["actual"] == INCORRECT_FORMAT)
+    error_in_test_cases = any(
+        ((not record["passed"]) and isinstance(record["actual"], str) and ERROR_PREFIX in record["actual"])
+        for record in records
+    )
+    timed_out = np.mean([1.0 if (not record["passed"]) and (record["actual"] == TIMEOUT) else 0.0 for record in records])
 
     return {
-        "score": score,
-        "acc": score,
-        "incorrect_format": 0,
-        "feedback": feedback,
+        "score": reward,
+        "acc": accuracy,
+        "pred": predictions,
+        "incorrect_format": 1 if incorrect_format else 0,
+        "error_in_test_cases": 1 if error_in_test_cases else 0,
+        "timed_out": 1 if timed_out else 0,
+        "truncated": 1 if was_truncated else 0,
+        "truncated_and_missing_answer": 1 if incorrect_format and was_truncated else 0,
+        "feedback": format_test_feedback(records, was_truncated=was_truncated),
     }
