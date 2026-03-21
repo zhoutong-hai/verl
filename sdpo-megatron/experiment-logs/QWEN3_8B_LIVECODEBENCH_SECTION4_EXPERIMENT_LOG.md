@@ -422,3 +422,23 @@ sky launch -c verl-qwen3-section4-livecodebench \
   - commit and push the evaluator patch
   - relaunch the same Section 4 SDPO experiment on the existing cluster
   - re-check first-step and multi-step progress on the corrected rich-feedback path
+
+### [In Progress] Corrected rich-feedback rerun is live on the fixed evaluator commit
+
+- Fix commit:
+  - `961b0e4b` `Fix Section 4 rich feedback evaluator`
+- Because Sky task submission stayed inconsistent on the existing single-node cluster, the rerun was started manually on the live head pod after fast-forwarding the remote checkout to the fixed commit.
+- Current corrected rerun:
+  - experiment `qwen3_8b_section4_livecodebench_sdpo_fsdp_fixed_feedback_20260321_173144`
+  - W&B run [`3ps8pj3z`](https://wandb.ai/hippocraticai/qwen3_8b_section4_livecodebench/runs/3ps8pj3z)
+  - log `/root/sky_logs/manual-qwen3-section4-fixed-feedback-20260321_173144.log`
+- Verified so far on the corrected path:
+  - remote checkout is on commit `961b0e4b`
+  - W&B run creation succeeded
+  - trainer connected to the live Ray cluster
+  - FSDP actor/ref workers loaded
+  - vLLM servers initialized
+  - `Training Progress:   0%|          | 0/120` was emitted on the corrected run
+- Current monitoring goal:
+  - wait for the first real `training/global_step`
+  - specifically confirm that the previous reward-worker `MemoryError` at `send_conn.send(...)` does not recur once the reward loop begins
