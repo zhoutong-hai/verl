@@ -147,7 +147,7 @@ sky launch -c verl-qwen3-section4-livecodebench \
 
 - The first successful end-to-end training run on this launcher reached the first real SDPO update.
 - W&B run:
-  - `https://wandb.ai/hippocraticai/qwen3_8b_section4_livecodebench/runs/3afxjxj1`
+  - [`3afxjxj1`](https://wandb.ai/hippocraticai/qwen3_8b_section4_livecodebench/runs/3afxjxj1)
 - Key first-step metrics from that run:
   - `training/global_step: 1`
   - `self_distillation/feedback_available_fraction: 0.9453125`
@@ -194,7 +194,7 @@ sky launch -c verl-qwen3-section4-livecodebench \
 
 - Current patched run:
   - job id `21`
-  - W&B run `r7co6lpk`
+  - W&B run [`r7co6lpk`](https://wandb.ai/hippocraticai/qwen3_8b_section4_livecodebench/runs/r7co6lpk)
 - Verified so far:
   - remote checkout is on commit `6cd62483`
   - no leaked standalone `True` / `False`
@@ -239,7 +239,7 @@ sky launch -c verl-qwen3-section4-livecodebench \
   - cluster `verl-qwen3-section4-livecodebench`
   - job id `62`
 - W&B run:
-  - `https://wandb.ai/hippocraticai/qwen3_8b_section4_livecodebench/runs/4e7m3pym`
+  - [`4e7m3pym`](https://wandb.ai/hippocraticai/qwen3_8b_section4_livecodebench/runs/4e7m3pym)
 - Verified on-cluster:
   - remote checkout is using the updated launcher settings
   - `main_ppo` is running with:
