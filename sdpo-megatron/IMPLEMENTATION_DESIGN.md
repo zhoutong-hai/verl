@@ -1,6 +1,6 @@
 # SDPO in `verl v0.7.0`: Main Idea, Port Structure, Experiment Guide, and Current Status
 
-Last updated: 2026-03-18
+Last updated: 2026-03-21
 
 ## Why this note exists
 
@@ -19,18 +19,26 @@ The SDPO port keeps the normal `verl` rollout and update loop, but changes how t
 ## Status snapshot
 
 - The earlier Megatron collapse was traced to a real correctness bug in the full-logit path, not to a generic SDPO instability.
-- That bug is fixed on this branch, and the corrected Megatron implementation now works end to end on small-model Qwen Physics runs.
+- That bug is fixed on this branch, and the corrected Megatron implementation now works end to end on both:
+  - small-model Qwen Physics runs
+  - larger 4-node GLM-4.5-Air Physics runs
 - The strongest local reference benchmark is the current branch-local Qwen Physics FSDP reproduction:
   - `val-core/sciknoweval/acc/mean@16 = 0.76171875` at step `305`
-- The corrected Megatron `student_topk` path is now in the same healthy regime:
+- On Qwen Physics, the corrected Megatron `student_topk` path is in the same healthy regime as the current branch-local FSDP reproduction:
   - latest visible `val-core/sciknoweval/acc/mean@16 = 0.72734375`
+- On GLM-4.5-Air Physics, the current stable SDPO reference is still the `teacher_topk` path:
+  - `val-core/sciknoweval/acc/mean@16 = 0.71953125` at step `180`
+- The GLM-4.5-Air `student_topk` path is also healthy and far beyond bring-up:
+  - `val-core/sciknoweval/acc/mean@16 = 0.65078125` at step `115`
 - The current conclusion is:
-  - corrected Megatron is consistent with the current branch-local FSDP reproduction on this benchmark family
+  - corrected Megatron is consistent with the current branch-local FSDP reproduction on small-model Qwen Physics
+  - corrected Megatron SDPO also works on larger 4-node GLM-4.5-Air Physics bring-up
   - exact parity with the original upstream FSDP/paper stack remains a separate question
-- The remaining question is parity quality and future large-scale design, not whether the Megatron implementation works at all.
+- The remaining question is parity quality and large-scale variant choice, not whether the Megatron implementation works at all.
 - For the detailed postmortem and experiment evidence, see:
   - [IMPLEMENTATION_REVIEW.md](/Users/zhoutong/code/verl/sdpo-megatron/IMPLEMENTATION_REVIEW.md)
   - [QWEN3_8B_PHYSICS_SECTION3_EXPERIMENT_LOG.md](/Users/zhoutong/code/verl/sdpo-megatron/experiment-logs/QWEN3_8B_PHYSICS_SECTION3_EXPERIMENT_LOG.md)
+  - [GLM45_AIR_PHYSICS_SECTION3_EXPERIMENT_LOG.md](/Users/zhoutong/code/verl/sdpo-megatron/experiment-logs/GLM45_AIR_PHYSICS_SECTION3_EXPERIMENT_LOG.md)
 
 ## How to interpret the current FSDP benchmark
 
@@ -415,7 +423,10 @@ Current parity-focused config expectation:
 Practical note:
 
 - `teacher_topk` is the current stable baseline path on this branch
-- `student_topk` is the parity-focused extension that now works on small models and is the right direction for further parity experiments
+- `student_topk` is the parity-focused extension that now works on both:
+  - small-model Qwen Physics
+  - 4-node GLM-4.5-Air Physics
+- on larger GLM-4.5-Air runs, `teacher_topk` is still the stronger reference baseline so far, while `student_topk` is now stable enough for direct quality comparison
 
 In the current full-logit branch, the key objects are:
 
@@ -653,6 +664,9 @@ Validation status:
 - the public Qwen2.5-0.5B GSM8K Megatron smoke path completed successfully
 - the public Qwen3 8B Physics Megatron full-logit path completed healthy long runs after the full-logit correctness fixes
 - the corrected Megatron Qwen Physics run is in the same healthy regime as the current FSDP reproduction, though still slightly behind the strongest FSDP benchmark at matched steps
+- the GLM-4.5-Air 4-node SDPO `teacher_topk` run completed healthy long-run checkpoints and is the current large-model reference on this branch
+- the GLM-4.5-Air 4-node SDPO `student_topk` run is also healthy and has progressed well beyond bring-up, enabling a real support-mode comparison on a larger model
+- the GLM-4.5-Air GRPO baseline remains weaker on this benchmark family; actor-side KL delayed collapse but did not prevent late long-response degeneration
 - the OLMo experiments on the current cluster image remain confounded by runtime support issues and should not be treated as the final algorithm comparison
 
 ## Best levers for follow-up experiments
