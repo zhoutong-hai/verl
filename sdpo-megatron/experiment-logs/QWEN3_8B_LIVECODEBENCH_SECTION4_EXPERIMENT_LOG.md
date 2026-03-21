@@ -70,25 +70,36 @@ sky launch -c verl-qwen3-section4-livecodebench \
 - inline validation samples in `run.log`
 - validation dumps under `/hai/zhoutong/section4_livecodebench_assets/validation_generations/`
 
-## Current Status Snapshot (2026-03-20)
+## Current Status Snapshot (2026-03-21 00:18 PT)
 
-- The Section 4 code path has been added locally, committed, and pushed.
+- The Section 4 SDPO path is working end-to-end through:
+  - cluster launch
+  - remote repo clone / install
+  - shared-data bootstrap on `/hai`
+  - Ray startup
+  - FSDP actor/ref + vLLM initialization
+  - W&B run creation
+  - first real SDPO training step on the unpatched functional-feedback log path
 - Current branch:
   - `codex/sdpo-megatron-v070`
-- Pushed commit used for this run:
-  - `f9a9b043`
-  - message: `Add Qwen3 Section 4 LiveCodeBench launcher`
-- The current launcher now follows the same successful Section 3 pattern:
-  - remote cluster clones `https://github.com/zhoutong-hai/verl.git`
-  - branch `codex/sdpo-megatron-v070`
-  - repo path `/root/verl-section4-livecodebench`
 - Current live cluster:
   - `verl-qwen3-section4-livecodebench`
-- Current SkyPilot status:
-  - `INIT`
-- Most recent observation:
-  - pod came up on Kubernetes
-  - cluster has not yet transitioned to `UP`
+- Latest pushed fix commit:
+  - `6cd62483`
+  - message: `Capture functional feedback stdout`
+- Current relaunch using `6cd62483`:
+  - job id: `21`
+  - W&B run: `https://wandb.ai/hippocraticai/qwen3_8b_section4_livecodebench/runs/r7co6lpk`
+  - status: running
+  - confirmed on this relaunch:
+    - first real SDPO step reached: `training/global_step: 1`
+    - no leaked standalone `True`
+    - no leaked standalone `False`
+    - no leaked standalone digit-only lines
+    - no leaked `Test case` lines
+    - no leaked `Invalid add value!` / `Exceeds maximum capacity!` lines
+  - current watch item:
+    - first-step reward time on this relaunch was slower than the previous run, so latency is being watched even though functionality is correct
 
 ## Debug Notes
 
@@ -120,3 +131,87 @@ sky launch -c verl-qwen3-section4-livecodebench \
   - remote `setup:` completes
   - dataset bootstrap begins if `/hai/zhoutong/section4_livecodebench_assets/data/lcb_v6` is missing files
   - `main_ppo` starts and emits the first training/validation logs
+
+### [Resolved] Shared LiveCodeBench v6 dataset bootstrap succeeded
+
+- The launcher created the shared Section 4 dataset assets on `/hai`:
+  - `lcb_v6.json`
+  - `train.json`
+  - `test.json`
+  - `train.parquet`
+  - `test.parquet`
+- Validation dump directories were also created successfully under:
+  - `/hai/zhoutong/section4_livecodebench_assets/validation_generations/`
+
+### [Resolved] First full SDPO Section 4 run reached `training/global_step: 1`
+
+- The first successful end-to-end training run on this launcher reached the first real SDPO update.
+- W&B run:
+  - `https://wandb.ai/hippocraticai/qwen3_8b_section4_livecodebench/runs/3afxjxj1`
+- Key first-step metrics from that run:
+  - `training/global_step: 1`
+  - `self_distillation/feedback_available_fraction: 0.9453125`
+  - `self_distillation/feedback_used_fraction: 0.8125`
+  - `self_distillation/reprompt_sample_fraction: 0.98828125`
+  - `critic/score/mean: 0.0546875`
+  - `response_length/mean: 1465.08203125`
+  - `timing_s/gen: 90.0713`
+  - `timing_s/reward: 14.8793`
+  - `timing_s/update_actor: 80.4759`
+  - `timing_s/step: 195.0009`
+
+### [Resolved] Assert-style feedback log spam was removed
+
+- The earlier rich-feedback harness was leaking assert-test stdout into the trainer log.
+- Fix:
+  - commit `ae8ee043`
+  - route assert-test stdout through the capture buffer in [code.py](/Users/zhoutong/code/verl/verl/utils/reward_score/feedback/code.py)
+- Result:
+  - no more leaked standalone `True` / `False`
+  - no more leaked `Test case ...` lines
+
+### [Resolved] Functional/context top-level stdout leak identified and patched
+
+- After the assert fix, the next run still leaked raw output during the first training step:
+  - standalone digit-only lines like `4`, `0`, `3`, `80`
+  - raw messages like `Invalid add value!` and `Exceeds maximum capacity!`
+- Root cause:
+  - `run_test_func()` executed the model completion before redirecting `stdout`
+  - shared `context` code in `run_tests_for_one_example()` also executed outside the capture path
+- Fix:
+  - commit `6cd62483`
+  - add `_exec_and_capture_output(...)`
+  - use it for:
+    - functional completion exec in [code.py](/Users/zhoutong/code/verl/verl/utils/reward_score/feedback/code.py)
+    - shared context exec in [code.py](/Users/zhoutong/code/verl/verl/utils/reward_score/feedback/code.py)
+- Relaunch procedure:
+  - push commit to `fork/codex/sdpo-megatron-v070`
+  - fast-forward remote checkout on the same cluster
+  - cancel old training job
+  - relaunch on the same `verl-qwen3-section4-livecodebench` cluster
+
+### [Resolved] Patched relaunch reached first step without leaked functional/context stdout
+
+- Current patched run:
+  - job id `21`
+  - W&B run `r7co6lpk`
+- Verified so far:
+  - remote checkout is on commit `6cd62483`
+  - no leaked standalone `True` / `False`
+  - no leaked standalone digit-only lines
+  - no leaked `Invalid add value!` / `Exceeds maximum capacity!` lines
+  - first real SDPO step reached on the patched path
+- First-step metrics on the patched relaunch:
+  - `training/global_step: 1`
+  - `self_distillation/feedback_available_fraction: 0.9375`
+  - `self_distillation/feedback_used_fraction: 0.78125`
+  - `self_distillation/reprompt_sample_fraction: 0.9921875`
+  - `critic/score/mean: 0.0625`
+  - `response_length/mean: 1150.3828125`
+  - `timing_s/gen: 88.5376`
+  - `timing_s/reward: 434.4397`
+  - `timing_s/update_actor: 78.3297`
+  - `timing_s/step: 610.2697`
+- Remaining observation:
+  - the functional fix removed the log leakage, but this relaunch had a noticeably slower reward/step time than the previous unpatched run
+  - this needs more monitoring to tell whether it is first-batch variance or a real performance regression
