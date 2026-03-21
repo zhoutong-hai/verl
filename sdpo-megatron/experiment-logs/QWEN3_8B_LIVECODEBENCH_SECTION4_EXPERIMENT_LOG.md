@@ -215,3 +215,62 @@ sky launch -c verl-qwen3-section4-livecodebench \
 - Remaining observation:
   - the functional fix removed the log leakage, but this relaunch had a noticeably slower reward/step time than the previous unpatched run
   - this needs more monitoring to tell whether it is first-batch variance or a real performance regression
+
+### [Resolved] Validation cadence was reduced for the next relaunch
+
+- To make the next live run easier to monitor and reduce unnecessary churn, the launcher was updated to make validation/logging less aggressive:
+  - `trainer.test_freq=10`
+  - `trainer.log_val_generations=4`
+  - `trainer.print_val_generations=1`
+- This was kept as a launcher-only change in:
+  - [run_qwen3_8b_livecodebench_section4.sh](/Users/zhoutong/code/verl/examples/sdpo_trainer/run_qwen3_8b_livecodebench_section4.sh)
+- Commit:
+  - `c2d50037`
+
+### [Note] Previous job `21` was manually interrupted during investigation
+
+- While probing the old run for a Python stack, a manual signal terminated job `21`.
+- That failure was investigation-induced, not a trainer-side crash.
+- Because of that, the next check was done by relaunching on the same cluster instead of treating job `21` as a clean product failure.
+
+### [Resolved] Same-cluster relaunch `62` reached `training/global_step: 1`
+
+- Relaunched on the same cluster:
+  - cluster `verl-qwen3-section4-livecodebench`
+  - job id `62`
+- W&B run:
+  - `https://wandb.ai/hippocraticai/qwen3_8b_section4_livecodebench/runs/4e7m3pym`
+- Verified on-cluster:
+  - remote checkout is using the updated launcher settings
+  - `main_ppo` is running with:
+    - `trainer.test_freq=10`
+    - `trainer.log_val_generations=4`
+    - `trainer.print_val_generations=1`
+  - the run reached the first real SDPO step and advanced the trainer progress bar to:
+    - `Training Progress:   1%|          | 1/120`
+- First-step metrics from job `62`:
+  - `training/global_step: 1`
+  - `self_distillation/feedback_available_fraction: 0.9140625`
+  - `self_distillation/feedback_used_fraction: 0.71875`
+  - `self_distillation/reprompt_sample_fraction: 0.98046875`
+  - `critic/score/mean: 0.0859375`
+  - `response_length/mean: 1192.44921875`
+  - `timing_s/gen: 88.1865`
+  - `timing_s/reward: 27.4059`
+  - `timing_s/update_actor: 79.6239`
+  - `timing_s/step: 204.1362`
+  - `perf/throughput: 550.45`
+
+### [Monitoring] Current live state after step 1 looks healthy enough to keep running
+
+- The cluster job is still active:
+  - `62  ... RUNNING`
+- Post-step monitoring shows:
+  - no traceback or fatal error in `run.log`
+  - `TaskRunner.run` remains alive
+  - a helper `ray::TaskRunner.run` has been consuming CPU after step 1 while the main trainer waits on it
+  - no new actor-task failures have appeared in Ray task summaries
+- Current interpretation:
+  - the run is no longer blocked on bring-up
+  - it has cleared the end-to-end correctness bar through the first real update
+  - the remaining watch item is forward progress beyond step 1, not a known crash
