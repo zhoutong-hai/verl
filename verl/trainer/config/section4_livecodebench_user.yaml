@@ -54,7 +54,7 @@ reward_model:
 trainer:
   project_name: qwen3_8b_section4_livecodebench
   nnodes: ${oc.decode:${oc.env:NNODES,1}}
-  n_gpus_per_node: ${oc.decode:${oc.env:N_GPUS_PER_NODE,8}}
+  n_gpus_per_node: ${oc.decode:${oc.env:N_GPUS_PER_NODE,4}}
   save_freq: -1
   test_freq: 5
   max_actor_ckpt_to_keep: 1
