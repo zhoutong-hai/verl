@@ -210,14 +210,14 @@ The experiments followed this progression:
 | Experiment | What it validated | Key outcome |
 |------------|-------------------|-------------|
 | **Smoke test** (Qwen2.5-0.5B, GSM8K) | End-to-end Megatron SDPO plumbing | Fixed colocated actor+ref init, config normalization |
-| **Full training** (Qwen2.5-0.5B, GSM8K) | Algorithm works beyond 3 steps | Setup completed, pending launch |
+| **Full training** (Qwen2.5-0.5B, GSM8K) | Algorithm works beyond 3 steps | Established the first end-to-end small-model training baseline and validated the basic SDPO loop beyond smoke testing |
 | **Chemistry** (Qwen3-8B) | Paper task reproduction | SDPO collapsed to zero targets; identified long-response dilution |
 | **Chemistry** (OLMo-3-7B) | Paper's original model choice | Blocked by vLLM runtime (needs v0.11.0+) |
 | **Physics** (OLMo-3-7B) | Easier task with same model | Same vLLM block; useful for validation dump debugging |
 | **Physics** (Qwen3-8B) | Clean Megatron vs FSDP comparison | Found and fixed the critical in-place logit mutation bug; Megatron reached near-parity |
 | **Physics** (GLM-4.5-Air, SDPO teacher_topk) | Scale to large MoE model on 4 nodes | Cleared multi-node bring-up, MoE, memory, and env propagation issues; reached stable SDPO training |
 | **Physics** (GLM-4.5-Air, GRPO) | Baseline comparison at the same scale | No-KL GRPO collapsed early; KL delayed collapse substantially but did not prevent late max-length degeneration |
-| **Physics** (GLM-4.5-Air, SDPO student_topk) | Large-model parity follow-up | Started after the stable teacher-topk baseline; used to compare support-construction semantics on the same stack |
+| **Physics** (GLM-4.5-Air, SDPO student_topk) | Large-model parity follow-up | Progressed into the same stable training regime as the teacher-topk baseline, making direct quality comparison possible |
 
 The review doc (`IMPLEMENTATION_REVIEW.md`) was triggered after the Physics Qwen3-8B experiments revealed the logit mutation bug. It captured the postmortem, updated the design understanding, and proposed the `student_topk` support mode — which then fed back into `IMPLEMENTATION_DESIGN.md`.
 
