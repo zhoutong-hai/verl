@@ -38,6 +38,9 @@ ROLLOUT_TP_SIZE="${ROLLOUT_TP_SIZE:-1}"
 ROLLOUT_PP_SIZE="${ROLLOUT_PP_SIZE:-1}"
 VLLM_GPU_MEM_UTIL="${VLLM_GPU_MEM_UTIL:-0.55}"
 VALIDATION_ROOT="${VALIDATION_ROOT:-/hai/zhoutong/section4_livecodebench_assets/validation_generations}"
+TEST_FREQ="${TEST_FREQ:-10}"
+LOG_VAL_GENERATIONS="${LOG_VAL_GENERATIONS:-4}"
+PRINT_VAL_GENERATIONS="${PRINT_VAL_GENERATIONS:-1}"
 
 mkdir -p "$LCB_DATA_DIR"
 
@@ -100,8 +103,9 @@ python3 -m verl.trainer.main_ppo \
   --config-name "$CONFIG_NAME" \
   trainer.experiment_name="$EXP_NAME" \
   "$LOGGER_OVERRIDE" \
+  trainer.test_freq="$TEST_FREQ" \
   trainer.validation_data_dir="$VALIDATION_DATA_DIR" \
-  trainer.log_val_generations=16 \
-  trainer.print_val_generations=4 \
+  trainer.log_val_generations="$LOG_VAL_GENERATIONS" \
+  trainer.print_val_generations="$PRINT_VAL_GENERATIONS" \
   trainer.validation_dump_generations=0 \
   "$@"
