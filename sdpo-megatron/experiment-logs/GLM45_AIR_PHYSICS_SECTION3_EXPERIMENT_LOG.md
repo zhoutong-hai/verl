@@ -1188,7 +1188,7 @@ Commit:
 
 - `5baf4bbd` — `Fix Megatron ref log-prob unpacking for KL`
 
-### [Active] Fresh KL GRPO rerun is past the previous immediate crash boundary
+### [Observed] Fresh KL GRPO rerun cleared the old crash boundary and later collapsed again
 
 After syncing commit `5baf4bbd` to all four GLM-Air pods, a fresh KL GRPO rerun was started on the
 existing 32-GPU Ray cluster.
@@ -1203,22 +1203,84 @@ Current run:
 - local log:
   - `/root/sky_logs/manual-glm45-air-grpo-kl-20260320_145038.log`
 
-Observed current state:
+Observed state:
 
 - W&B registration succeeded
 - the 4-node custom Ray cluster is healthy and all 32 GPUs are visible
 - Megatron actor/ref model shards and vLLM rollout servers are up
 - the run is already well past the previous immediate `compute_ref_log_prob()` crash boundary
 
-As of this note:
+Healthy early phase:
 
-- no new traceback has appeared
-- `training/global_step` has not been emitted yet
-- the run still appears to be in the long first-step bring-up / first-rollout phase rather than a
-  hard failure
+- step `45`
+  - `val-core/sciknoweval/acc/mean@16 = 0.46484375`
+  - `val-core/sciknoweval/acc/best@16/mean = 0.5770125`
+  - `val-core/sciknoweval/acc/maj@16/mean = 0.48699999999999993`
+- step `46`
+  - `response_length/mean = 371.1328125`
+  - `response_length/clip_ratio = 0.0078125`
+- step `47`
+  - `response_length/mean = 363.7421875`
+  - `response_length/clip_ratio = 0.0`
+- so the KL rerun clearly passed the older no-KL GRPO collapse windows around steps `33` and `55-59`
 
-Immediate monitoring goal:
+Late failure pattern:
 
-- keep the KL GRPO rerun under observation until it either
-  - reaches real train steps, or
-  - presents a concrete new runtime failure to fix
+- by step `115` the run had drifted into the max-length regime again
+  - `val-core/sciknoweval/acc/mean@16 = 0.42109375`
+  - `val-core/sciknoweval/acc/best@16/mean = 0.5458624999999999`
+  - `val-core/sciknoweval/acc/maj@16/mean = 0.42417499999999997`
+  - `response_length/mean = 1536.0`
+  - `response_length/clip_ratio = 1.0`
+- step `116`
+  - `response_length/mean = 1536.0`
+  - `response_length/clip_ratio = 1.0`
+- step `117`
+  - `response_length/mean = 1536.0`
+  - `response_length/clip_ratio = 1.0`
+- step `118`
+  - `response_length/mean = 1536.0`
+  - `response_length/clip_ratio = 1.0`
+
+Interpretation:
+
+- actor-side KL regularization helps significantly with startup stability and delays the old GRPO collapse
+- however, on this GLM-Air Physics setup it does not fully prevent the late long-response degeneration
+- this makes the next highest-signal follow-up a direct SDPO comparison on the same 4-node model stack,
+  including the `student_topk` teacher-target variant
+
+### [Started] GLM-Air SDPO rerun with student-support top-k
+
+After concluding that KL helps GRPO startup but does not fully prevent the late long-response collapse,
+the next experiment switches back to SDPO and changes the support construction from `teacher_topk` to
+`student_topk`.
+
+Launcher update:
+
+- `examples/skypilot/verl-glm45-air-section3-physics.yaml`
+  - added `VARIANT=sdpo_megatron_student_topk`
+  - this reuses the same 4-node GLM-Air SDPO settings but sets
+    - `actor_rollout_ref.actor.self_distillation.support_mode=student_topk`
+
+New run:
+
+- experiment:
+  - `glm45_air_section3_physics_sdpo_megatron_student_topk_20260320_230203`
+- W&B:
+  - run id: `m9tu69d0`
+  - URL: <https://wandb.ai/hippocraticai/glm45_air_section3_physics/runs/m9tu69d0>
+- local log:
+  - `/root/sky_logs/manual-glm45-air-sdpo-student-topk-20260320_230203.log`
+
+Observed startup state so far:
+
+- config validation succeeded
+- dataset loading succeeded
+- W&B registration succeeded
+- `Training Progress` has appeared
+- no startup traceback has appeared yet
+
+Immediate goal:
+
+- confirm that the GLM-Air `student_topk` path gets through the first rollout / update boundary cleanly
+- then compare its early behavior against the already-healthy `teacher_topk` SDPO reference
