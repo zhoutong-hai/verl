@@ -1284,3 +1284,80 @@ Immediate goal:
 
 - confirm that the GLM-Air `student_topk` path gets through the first rollout / update boundary cleanly
 - then compare its early behavior against the already-healthy `teacher_topk` SDPO reference
+
+### [Summary] GLM-Air Physics results so far
+
+At this point the GLM-Air Physics campaign has answered the main bring-up question:
+
+- the 4-node Megatron SDPO path works on `GLM-4.5-Air`
+- both the stable `teacher_topk` SDPO path and the newer `student_topk` SDPO path run for real training steps on
+  the shared 32-GPU cluster
+
+Current experiment summary:
+
+- stable SDPO `teacher_topk` reference:
+  - experiment:
+    - `glm45_air_section3_physics_sdpo_megatron_20260320_004633`
+  - W&B:
+    - run id: `yirkyq4x`
+    - URL: <https://wandb.ai/hippocraticai/glm45_air_section3_physics/runs/yirkyq4x>
+  - confirmed healthy long-run checkpoint:
+    - step `180`
+    - `val-core/sciknoweval/acc/mean@16 = 0.71953125`
+    - `val-core/sciknoweval/acc/best@16/mean = 0.8952249999999999`
+    - `val-core/sciknoweval/acc/maj@16/mean = 0.7945375`
+    - `response_length/mean = 413.15625`
+    - `response_length/clip_ratio = 0.0625`
+  - interpretation:
+    - this is the current stable GLM-Air SDPO baseline
+    - it showed that the corrected 4-node Megatron stack is not just launching, but training in a healthy regime
+
+- GRPO without KL:
+  - both reruns drifted into the long-response collapse regime
+  - the repeated pattern was:
+    - response length inflation
+    - rising clip ratio
+    - eventual degradation
+  - this is best treated as a GRPO training-dynamics issue on this task, not an infra bring-up failure
+
+- GRPO with actor-side KL:
+  - experiment:
+    - `glm45_air_section3_physics_grpo_megatron_kl_20260320_145038`
+  - W&B:
+    - run id: `w22kusnb`
+    - URL: <https://wandb.ai/hippocraticai/glm45_air_section3_physics/runs/w22kusnb>
+  - outcome:
+    - KL materially delayed the earlier collapse window
+    - but by steps `115-118` the run still converged to the max-length regime
+  - interpretation:
+    - KL helped stability, but did not fully fix GRPO for this setup
+
+- current SDPO `student_topk` follow-up:
+  - experiment:
+    - `glm45_air_section3_physics_sdpo_megatron_student_topk_20260320_230203`
+  - W&B:
+    - run id: `m9tu69d0`
+    - URL: <https://wandb.ai/hippocraticai/glm45_air_section3_physics/runs/m9tu69d0>
+  - current live checkpoint:
+    - step `115`
+    - `val-core/sciknoweval/acc/mean@16 = 0.65078125`
+    - `val-core/sciknoweval/acc/best@16/mean = 0.8273250000000001`
+    - `val-core/sciknoweval/acc/maj@16/mean = 0.7179875`
+    - `self_distillation/success_group_fraction = 0.8125`
+    - `self_distillation/reprompt_sample_fraction = 0.8046875`
+    - `self_distillation/empty_target_batch = 0.0`
+    - `response_length/mean = 621.96875`
+    - `response_length/clip_ratio = 0.140625`
+    - `self_distillation/selected_logprob_from_full_abs_diff_mean = 5.248298009519203e-07`
+  - interpretation:
+    - the `student_topk` path is healthy and clearly beyond bring-up
+    - its probability-path invariant remains clean
+    - it is currently somewhat behind the stronger `teacher_topk` GLM-Air SDPO reference on matched late-stage
+      quality, but it is in the same stable training regime rather than a collapse regime
+
+Current conclusion:
+
+- GLM-Air SDPO on Megatron is working on the 4-node setup
+- `teacher_topk` is the current strongest GLM-Air SDPO reference
+- `student_topk` is functioning correctly and is now in the right regime for direct quality comparison
+- GRPO remains weaker on this benchmark family, even after adding actor-side KL
