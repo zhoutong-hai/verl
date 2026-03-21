@@ -70,36 +70,37 @@ sky launch -c verl-qwen3-section4-livecodebench \
 - inline validation samples in `run.log`
 - validation dumps under `/hai/zhoutong/section4_livecodebench_assets/validation_generations/`
 
-## Current Status Snapshot (2026-03-21 00:18 PT)
+## Current Status Snapshot (2026-03-21 00:49 PDT)
 
-- The Section 4 SDPO path is working end-to-end through:
+- The current live Section 4 SDPO run is:
+  - cluster `verl-qwen3-section4-livecodebench`
+  - job id `62`
+  - W&B run [`4e7m3pym`](https://wandb.ai/hippocraticai/qwen3_8b_section4_livecodebench/runs/4e7m3pym)
+  - queue status `RUNNING`
+- The path is now verified through:
   - cluster launch
   - remote repo clone / install
   - shared-data bootstrap on `/hai`
   - Ray startup
   - FSDP actor/ref + vLLM initialization
   - W&B run creation
-  - first real SDPO training step on the unpatched functional-feedback log path
-- Current branch:
-  - `codex/sdpo-megatron-v070`
-- Current live cluster:
-  - `verl-qwen3-section4-livecodebench`
-- Latest pushed fix commit:
-  - `6cd62483`
-  - message: `Capture functional feedback stdout`
-- Current relaunch using `6cd62483`:
-  - job id: `21`
-  - W&B run: `https://wandb.ai/hippocraticai/qwen3_8b_section4_livecodebench/runs/r7co6lpk`
-  - status: running
-  - confirmed on this relaunch:
-    - first real SDPO step reached: `training/global_step: 1`
-    - no leaked standalone `True`
-    - no leaked standalone `False`
-    - no leaked standalone digit-only lines
-    - no leaked `Test case` lines
-    - no leaked `Invalid add value!` / `Exceeds maximum capacity!` lines
-  - current watch item:
-    - first-step reward time on this relaunch was slower than the previous run, so latency is being watched even though functionality is correct
+  - multi-step SDPO training progress on the patched rich-feedback path
+- Latest observed trainer progress:
+  - `training/global_step: 5`
+  - `Training Progress:   4%|▍         | 5/120`
+  - latest logged epoch: `1`
+- Latest observed step-5 metrics:
+  - `self_distillation/feedback_used_fraction: 0.75`
+  - `critic/score/mean: 0.05859375`
+  - `response_length/mean: 1922.78125`
+  - `timing_s/reward: 177.9668`
+  - `timing_s/step: 352.3154`
+- Current maturity assessment:
+  - this is a stable multi-step bring-up run
+  - it is still pre-validation and should not yet be treated as a completed Section 4 result
+- Important hardware note:
+  - the current launcher reserves an `H200:8` node but runs on GPUs `0,1,2,3` only
+  - throughput/cost comparisons should be interpreted as a 4-GPU-on-8-GPU-node setup unless the launcher is changed
 
 ## Debug Notes
 
@@ -293,6 +294,6 @@ sky launch -c verl-qwen3-section4-livecodebench \
   - `timing_s/step: 504.7002`
   - `perf/throughput: 307.77`
 - Updated interpretation:
-  - the job is in a genuinely good running state now
+  - the job is in a good multi-step bring-up state now
   - it is making multi-step training progress on the same cluster
-  - the remaining work is ordinary experiment monitoring, not unblock/debug bring-up
+  - it is still too early to claim validation success or experiment maturity
