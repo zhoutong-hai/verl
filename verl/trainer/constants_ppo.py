@@ -40,6 +40,32 @@ PPO_RAY_RUNTIME_ENV = {
     },
 }
 
+# Training recipes often resolve config values from shell environment variables
+# inside remote Ray actors, so keep the common launcher-side overrides in sync.
+PPO_RAY_PASSTHROUGH_ENV_VARS = (
+    "ACTOR_LR",
+    "CUDA_VISIBLE_DEVICES",
+    "HF_HOME",
+    "LCB_DATA_DIR",
+    "MAX_MODEL_LEN",
+    "MAX_PROMPT_LENGTH",
+    "MAX_REPROMPT_LEN",
+    "MAX_RESPONSE_LENGTH",
+    "MODEL_PATH",
+    "N_GPUS_PER_NODE",
+    "NNODES",
+    "PPO_MINI_BATCH_SIZE",
+    "ROLLOUT_PP_SIZE",
+    "ROLLOUT_TP_SIZE",
+    "VALIDATION_DATA_DIR",
+    "VALIDATION_ROOT",
+    "VERL_REPO_DIR",
+    "VLLM_GPU_MEM_UTIL",
+    "WANDB_API_KEY",
+    "WANDB_ENTITY",
+    "WANDB_PROJECT",
+)
+
 
 def get_ppo_ray_runtime_env():
     """
@@ -58,6 +84,9 @@ def get_ppo_ray_runtime_env():
     # Keep these variables in runtime_env, and prefer the driver's current value
     # when it exists so multi-node workers see the same transport/runtime setup.
     for key in list(runtime_env["env_vars"].keys()):
+        if os.environ.get(key) is not None:
+            runtime_env["env_vars"][key] = os.environ[key]
+    for key in PPO_RAY_PASSTHROUGH_ENV_VARS:
         if os.environ.get(key) is not None:
             runtime_env["env_vars"][key] = os.environ[key]
     return runtime_env
