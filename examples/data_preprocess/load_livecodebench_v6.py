@@ -12,9 +12,10 @@ CODE_PROMPT = (
     "You are a coding expert. You will be given a coding problem, and you need to write a correct Python "
     "program that matches the specification and passes all tests. The time limit is 1 second. Unless the "
     "problem explicitly asks for a function signature, your program should read from standard input and write "
-    "to standard output. Think through the solution silently. Your final response must contain exactly one "
-    "Python code block formatted as ```python ... ```, with no explanation or extra text before or after the "
-    "code block.\n\n{problem}"
+    "to standard output. Think through the solution silently. Do not repeat the prompt, sample outputs, "
+    "feedback, or any natural-language explanation. Start your final response immediately with ```python and "
+    "end it with ```. Your final response must contain exactly one Python code block formatted as "
+    "```python ... ```, with no extra text before or after the code block.\n\n{problem}"
 )
 
 LCB_TEST_CUTOFF = datetime(2025, 2, 1)

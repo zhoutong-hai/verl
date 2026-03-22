@@ -632,11 +632,25 @@ def run_tests_for_one_example(test_cases, completion, send_conn, sparse_rewards,
         send_conn.close()
 
 
+STRICT_PYTHON_BLOCK_PATTERN = re.compile(r"^\s*```python\s*\n(?P<code>.*?)```\s*$", re.DOTALL | re.IGNORECASE)
+STRICT_FENCED_BLOCK_PATTERN = re.compile(r"^\s*```(?:py)?\s*\n(?P<code>.*?)```\s*$", re.DOTALL | re.IGNORECASE)
+
+
 def extract_code(response):
-    blocks = re.findall(r"```(\w*)\n(.*?)```", response, re.DOTALL)
-    if not blocks:
+    if not isinstance(response, str):
         return None
-    return max((code for _, code in blocks), key=len)
+
+    strict_match = STRICT_PYTHON_BLOCK_PATTERN.fullmatch(response)
+    if strict_match:
+        return strict_match.group("code")
+
+    # Be slightly permissive about the language tag, while still requiring the
+    # entire response to be exactly one fenced block with no surrounding text.
+    strict_match = STRICT_FENCED_BLOCK_PATTERN.fullmatch(response)
+    if strict_match:
+        return strict_match.group("code")
+
+    return None
 
 
 def format_test_feedback(

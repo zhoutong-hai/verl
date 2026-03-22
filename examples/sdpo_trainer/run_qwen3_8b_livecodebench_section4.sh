@@ -7,7 +7,7 @@ cd "$REPO_ROOT"
 
 VARIANT="${VARIANT:-sdpo_fsdp}"
 REMOTE_MODEL_PATH="/hai/zhoutong/section3_chemistry_assets/models/Qwen3-8B-Base"
-REMOTE_LCB_DATA_DIR="/hai/zhoutong/section4_livecodebench_assets/data/lcb_v6_strict_format_v1"
+REMOTE_LCB_DATA_DIR="/hai/zhoutong/section4_livecodebench_assets/data/lcb_v6_strict_format_v2"
 LOCAL_LCB_DATA_DIR="/Users/zhoutong/code/SDPO/datasets/lcb_v6"
 RAW_JSON_BASENAME="lcb_v6.json"
 

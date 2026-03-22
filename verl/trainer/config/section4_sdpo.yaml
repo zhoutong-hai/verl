@@ -28,6 +28,26 @@ actor_rollout_ref:
       include_environment_feedback: true
       environment_feedback_only_without_solution: true
       max_reprompt_len: ${oc.decode:${oc.env:MAX_REPROMPT_LEN,10240}}
+      reprompt_template: |
+        {prompt}
+
+        The following reference material is provided only to help you solve the original question.
+        {solution}{feedback}
+        Answer the original question again.
+        Reply with exactly one ```python ... ``` block.
+        Do not include any explanation, prompt echo, sample-output echo, or mention of the reference material.
+      solution_template: |
+
+        Reference successful attempt (use the code logic only; ignore any prose or text outside the code block):
+
+        {successful_previous_attempt}
+
+      feedback_template: |
+
+        Reference feedback from an earlier unsuccessful attempt (use privately; do not mention it in your answer):
+
+        {feedback_raw}
+
       is_clip: 2.0
     optim:
       lr: ${oc.decode:${oc.env:ACTOR_LR,1e-5}}
