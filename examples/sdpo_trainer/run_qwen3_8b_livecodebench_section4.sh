@@ -7,7 +7,7 @@ cd "$REPO_ROOT"
 
 VARIANT="${VARIANT:-sdpo_fsdp}"
 REMOTE_MODEL_PATH="/hai/zhoutong/section3_chemistry_assets/models/Qwen3-8B-Base"
-REMOTE_LCB_DATA_DIR="/hai/zhoutong/section4_livecodebench_assets/data/lcb_v6"
+REMOTE_LCB_DATA_DIR="/hai/zhoutong/section4_livecodebench_assets/data/lcb_v6_strict_format_v1"
 LOCAL_LCB_DATA_DIR="/Users/zhoutong/code/SDPO/datasets/lcb_v6"
 RAW_JSON_BASENAME="lcb_v6.json"
 
@@ -43,8 +43,9 @@ MAX_MODEL_LEN="${MAX_MODEL_LEN:-18944}"
 MAX_REPROMPT_LEN="${MAX_REPROMPT_LEN:-10240}"
 PPO_MINI_BATCH_SIZE="${PPO_MINI_BATCH_SIZE:-32}"
 ACTOR_LR="${ACTOR_LR:-1e-5}"
+FORMAT_PENALTY="${FORMAT_PENALTY:--0.25}"
 VALIDATION_ROOT="${VALIDATION_ROOT:-/hai/zhoutong/section4_livecodebench_assets/validation_generations}"
-TEST_FREQ="${TEST_FREQ:-10}"
+TEST_FREQ="${TEST_FREQ:-5}"
 LOG_VAL_GENERATIONS="${LOG_VAL_GENERATIONS:-4}"
 PRINT_VAL_GENERATIONS="${PRINT_VAL_GENERATIONS:-1}"
 
@@ -109,6 +110,7 @@ export MAX_MODEL_LEN
 export MAX_REPROMPT_LEN
 export PPO_MINI_BATCH_SIZE
 export ACTOR_LR
+export FORMAT_PENALTY
 export VERL_REPO_DIR="${VERL_REPO_DIR:-$REPO_ROOT}"
 
 python3 -m verl.trainer.main_ppo \

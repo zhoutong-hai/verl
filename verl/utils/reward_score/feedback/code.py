@@ -6,6 +6,7 @@ import faulthandler
 import io
 import json
 import multiprocessing
+import os
 import re
 import sys
 import time
@@ -22,7 +23,25 @@ OUTER_ERROR_PREFIX = "ERROR: "
 MAX_ADDITIONAL_MEMORY_BYTES = 1024 * 1024 * 1024  # 1GB
 DEFAULT_TIMEOUT = 1
 TIMEOUT_SCALER = 1.0
-FORMAT_PENALTY = False
+
+
+def _float_env(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+FORMAT_PENALTY = _float_env("FORMAT_PENALTY", 0.0)
+INCORRECT_FORMAT_FEEDBACK = (
+    "Incorrect Format: Reply with only a single ```python ... ``` block. "
+    "Do not include any explanation, prompt echo, or extra text before or after the code block."
+)
+TRUNCATED_INCORRECT_FORMAT_FEEDBACK = (
+    "Truncated Attempt: Your previous response reached the maximum response length. Retry with a shorter "
+    "solution and reply with only a single ```python ... ``` block, with no explanation or extra text "
+    "before or after it."
+)
 
 FILENAME = "Solution.py"
 TESTS_FILENAME = "Tests.py"
@@ -726,11 +745,9 @@ def format_test_feedback(
             _render_debug_block(debug_text)
         elif is_incorrect_format:
             if was_truncated:
-                parts.append(
-                    "Truncated Attempt: Your previous response was too long and truncated because it reached the maximum response length. Try again with a shorter response."
-                )
+                parts.append(TRUNCATED_INCORRECT_FORMAT_FEEDBACK)
             else:
-                parts.append("Incorrect Format: Put your code inside a ```python ... ``` block.")
+                parts.append(INCORRECT_FORMAT_FEEDBACK)
         else:
             parts.append(f"Test Case {test_idx}: Wrong Answer")
             parts.append("")
@@ -910,6 +927,8 @@ def compute_score(completion, test_cases, extra_info=None, sparse_rewards=True, 
         reward = accuracy
 
     incorrect_format = (len(records) == 1) and (not records[0]["passed"]) and (records[0]["actual"] == INCORRECT_FORMAT)
+    if split != "test" and incorrect_format and FORMAT_PENALTY != 0.0:
+        reward = FORMAT_PENALTY
     error_in_test_cases = any(
         ((not record["passed"]) and isinstance(record["actual"], str) and ERROR_PREFIX in record["actual"])
         for record in records

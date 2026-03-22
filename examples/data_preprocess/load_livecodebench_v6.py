@@ -10,9 +10,11 @@ from datasets import concatenate_datasets, load_dataset
 
 CODE_PROMPT = (
     "You are a coding expert. You will be given a coding problem, and you need to write a correct Python "
-    "program that matches the specification and passes all tests. The time limit is 1 second. You may start "
-    "by outlining your thought process. In the end, please provide the complete code in a code block enclosed "
-    "with ``` ```.\n\n{problem}"
+    "program that matches the specification and passes all tests. The time limit is 1 second. Unless the "
+    "problem explicitly asks for a function signature, your program should read from standard input and write "
+    "to standard output. Think through the solution silently. Your final response must contain exactly one "
+    "Python code block formatted as ```python ... ```, with no explanation or extra text before or after the "
+    "code block.\n\n{problem}"
 )
 
 LCB_TEST_CUTOFF = datetime(2025, 2, 1)
