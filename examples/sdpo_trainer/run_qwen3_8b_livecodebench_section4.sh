@@ -50,8 +50,9 @@ TEST_FREQ="${TEST_FREQ:-5}"
 LOG_VAL_GENERATIONS="${LOG_VAL_GENERATIONS:-4}"
 PRINT_VAL_GENERATIONS="${PRINT_VAL_GENERATIONS:-1}"
 REQUIRE_WANDB="${REQUIRE_WANDB:-1}"
+FORCE_WANDB="${FORCE_WANDB:-0}"
 
-if [[ "$REQUIRE_WANDB" == "1" && -z "${WANDB_API_KEY:-}" ]]; then
+if [[ "$REQUIRE_WANDB" == "1" && "$FORCE_WANDB" != "1" && -z "${WANDB_API_KEY:-}" ]]; then
   echo "WANDB_API_KEY is required for the Section 4 launch path." >&2
   exit 1
 fi
@@ -95,7 +96,7 @@ esac
 
 EXP_NAME="${EXP_NAME:-$DEFAULT_EXP_NAME}"
 
-if [[ -n "${WANDB_API_KEY:-}" ]]; then
+if [[ "$FORCE_WANDB" == "1" || -n "${WANDB_API_KEY:-}" ]]; then
   LOGGER_OVERRIDE='trainer.logger=["console","wandb"]'
 else
   LOGGER_OVERRIDE='trainer.logger=["console"]'
@@ -119,6 +120,7 @@ export PPO_MINI_BATCH_SIZE
 export ACTOR_LR
 export SUCCESS_REWARD_THRESHOLD
 export FORMAT_PENALTY
+export FORCE_WANDB
 export VERL_REPO_DIR="${VERL_REPO_DIR:-$REPO_ROOT}"
 
 python3 -m verl.trainer.main_ppo \
