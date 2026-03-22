@@ -71,6 +71,12 @@ class SelfDistillationConfig(BaseConfig):
         "The following is feedback from your unsuccessful earlier attempt:\n\n"
         "{feedback_raw}\n\n"
     )
+    include_failed_attempt_in_feedback_only: bool = False
+    failed_attempt_template: str = (
+        "\n"
+        "Previous unsuccessful attempt to revise (use privately; do not copy its mistakes or mention it):\n\n"
+        "{previous_attempt}\n\n"
+    )
     include_environment_feedback: bool = False
     environment_feedback_only_without_solution: bool = False
 

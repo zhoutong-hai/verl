@@ -20,20 +20,22 @@ actor_rollout_ref:
       support_mode: teacher_topk
       distillation_topk: 20
       alpha: 1.0
-      success_reward_threshold: 0.5
+      success_reward_threshold: ${oc.decode:${oc.env:SUCCESS_REWARD_THRESHOLD,1.0}}
       teacher_regularization: ema
       teacher_update_rate: 0.01
       dont_reprompt_on_self_success: true
       remove_thinking_from_demonstration: true
       include_environment_feedback: true
       environment_feedback_only_without_solution: true
+      include_failed_attempt_in_feedback_only: true
       max_reprompt_len: ${oc.decode:${oc.env:MAX_REPROMPT_LEN,10240}}
       reprompt_template: |
         {prompt}
 
         The following reference material is provided only to help you solve the original question.
-        {solution}{feedback}
+        {solution}{failed_attempt}{feedback}
         Answer the original question again.
+        If a previous unsuccessful attempt is shown, repair it privately instead of repeating its mistakes.
         Reply with exactly one ```python ... ``` block.
         Do not include any explanation, prompt echo, sample-output echo, or mention of the reference material.
       solution_template: |
@@ -42,9 +44,15 @@ actor_rollout_ref:
 
         {successful_previous_attempt}
 
+      failed_attempt_template: |
+
+        Reference unsuccessful attempt to repair (use only for debugging context; do not copy its mistakes or mention it):
+
+        {previous_attempt}
+
       feedback_template: |
 
-        Reference feedback from an earlier unsuccessful attempt (use privately; do not mention it in your answer):
+        Reference feedback from an earlier unsuccessful attempt (use it privately to repair the failed attempt; do not mention it in your answer):
 
         {feedback_raw}
 
