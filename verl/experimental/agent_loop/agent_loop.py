@@ -776,8 +776,18 @@ class AgentLoopWorkerBase:
         input_ids = torch.cat([input.input_ids for input in inputs], dim=0)
         position_ids = torch.cat([input.position_ids for input in inputs], dim=0)
         optional_outputs = {}
-        if inputs[0].response_logprobs is not None:
-            optional_outputs["rollout_log_probs"] = torch.cat([input.response_logprobs for input in inputs], dim=0)
+        logprob_tensors = [input.response_logprobs for input in inputs]
+        if all(tensor is not None for tensor in logprob_tensors):
+            optional_outputs["rollout_log_probs"] = torch.cat(
+                [tensor for tensor in logprob_tensors if tensor is not None], dim=0
+            )
+        elif any(tensor is not None for tensor in logprob_tensors):
+            missing = sum(tensor is None for tensor in logprob_tensors)
+            logger.warning(
+                "Skipping rollout_log_probs for agent-loop batch because %s/%s samples are missing response_logprobs.",
+                missing,
+                len(logprob_tensors),
+            )
         if inputs[0].routed_experts is not None:
             optional_outputs["routed_experts"] = torch.cat([input.routed_experts for input in inputs], dim=0)
 

@@ -53,14 +53,29 @@ class SingleTurnAgentLoop(AgentLoopBase):
         if not truncated_token_ids:
             return output.token_ids, output.log_probs
 
-        truncated_log_probs = None
-        if output.log_probs is not None:
-            prefix_len = len(truncated_token_ids)
+        if output.log_probs is None:
+            return truncated_token_ids, None
+
+        # Preserve rollout logprobs only when the truncated code block can be expressed
+        # as an exact prefix of the sampled token stream. If we cannot align the boundary
+        # to the original tokens, keep the original sample rather than mixing rewritten
+        # tokens with invalid logprobs.
+        target_prefix_len = len(truncated_token_ids)
+        candidate_prefix_lens = [target_prefix_len]
+        for delta in range(1, 33):
+            candidate_prefix_lens.extend([target_prefix_len - delta, target_prefix_len + delta])
+
+        seen_prefix_lens = set()
+        for prefix_len in candidate_prefix_lens:
+            if prefix_len <= 0 or prefix_len > len(output.token_ids) or prefix_len in seen_prefix_lens:
+                continue
+            seen_prefix_lens.add(prefix_len)
             prefix_text = self.tokenizer.decode(output.token_ids[:prefix_len], skip_special_tokens=True)
             if prefix_text == truncated_text:
-                truncated_log_probs = output.log_probs[:prefix_len]
+                return output.token_ids[:prefix_len], output.log_probs[:prefix_len]
 
-        return truncated_token_ids, truncated_log_probs
+        logger.debug("Skipping code-block truncation because token/logprob prefix alignment failed.")
+        return output.token_ids, output.log_probs
 
     async def run(self, sampling_params: dict[str, Any], **kwargs) -> AgentLoopOutput:
         messages = list(kwargs["raw_prompt"])
