@@ -30,8 +30,8 @@ actor_rollout_ref:
     tensor_model_parallel_size: ${oc.decode:${oc.env:ROLLOUT_TP_SIZE,1}}
     pipeline_model_parallel_size: ${oc.decode:${oc.env:ROLLOUT_PP_SIZE,1}}
     repetition_penalty: ${oc.decode:${oc.env:ROLLOUT_REPETITION_PENALTY,1.05}}
-    stop: ${oc.decode:${oc.env:ROLLOUT_STOP_STRINGS,null}}
-    include_stop_str_in_output: ${oc.decode:${oc.env:ROLLOUT_INCLUDE_STOP_STR,true}}
+    stop: null
+    include_stop_str_in_output: false
     log_prob_micro_batch_size_per_gpu: 1
     max_num_batched_tokens: ${max_model_len}
     max_model_len: ${max_model_len}
@@ -39,8 +39,8 @@ actor_rollout_ref:
       top_p: 0.95
       temperature: 0.6
       repetition_penalty: ${oc.decode:${oc.env:VAL_REPETITION_PENALTY,1.1}}
-      stop: ${oc.decode:${oc.env:VAL_STOP_STRINGS,null}}
-      include_stop_str_in_output: ${oc.decode:${oc.env:VAL_INCLUDE_STOP_STR,true}}
+      stop: null
+      include_stop_str_in_output: false
       n: 4
       do_sample: true
 

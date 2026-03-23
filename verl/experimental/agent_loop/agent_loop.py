@@ -13,6 +13,7 @@
 # limitations under the License.
 import asyncio
 import heapq
+import json
 import logging
 import os
 import random
@@ -52,6 +53,28 @@ from verl.workers.rollout.replica import TokenOutput, get_rollout_replica_class
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+
+def _load_stop_strings_from_env(var_name: str) -> Optional[list[str]]:
+    raw = os.getenv(var_name)
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        logger.warning("Failed to decode %s as JSON stop-string list: %r", var_name, raw)
+        return None
+    if not isinstance(parsed, list) or any(not isinstance(item, str) for item in parsed):
+        logger.warning("%s must decode to a list[str], got %r", var_name, parsed)
+        return None
+    return parsed
+
+
+def _load_bool_from_env(var_name: str) -> Optional[bool]:
+    raw = os.getenv(var_name)
+    if raw is None:
+        return None
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 class AsyncLLMServerManager:
@@ -430,8 +453,15 @@ class AgentLoopWorkerBase:
             repetition_penalty=config.get("repetition_penalty", 1.0),
             logprobs=config.calculate_log_probs,
         )
-        if config.get("stop", None) is not None:
+        rollout_stop = _load_stop_strings_from_env("ROLLOUT_STOP_STRINGS")
+        if rollout_stop is not None:
+            sampling_params["stop"] = rollout_stop
+        elif config.get("stop", None) is not None:
             sampling_params["stop"] = list(config.stop)
+        rollout_include_stop = _load_bool_from_env("ROLLOUT_INCLUDE_STOP_STR")
+        if rollout_include_stop is not None:
+            sampling_params["include_stop_str_in_output"] = rollout_include_stop
+        elif config.get("stop", None) is not None:
             sampling_params["include_stop_str_in_output"] = bool(
                 config.get("include_stop_str_in_output", False)
             )
@@ -442,8 +472,15 @@ class AgentLoopWorkerBase:
             sampling_params["temperature"] = config.val_kwargs.temperature
             if config.val_kwargs.get("repetition_penalty", None) is not None:
                 sampling_params["repetition_penalty"] = config.val_kwargs.repetition_penalty
-            if config.val_kwargs.get("stop", None) is not None:
+            val_stop = _load_stop_strings_from_env("VAL_STOP_STRINGS")
+            if val_stop is not None:
+                sampling_params["stop"] = val_stop
+            elif config.val_kwargs.get("stop", None) is not None:
                 sampling_params["stop"] = list(config.val_kwargs.stop)
+            val_include_stop = _load_bool_from_env("VAL_INCLUDE_STOP_STR")
+            if val_include_stop is not None:
+                sampling_params["include_stop_str_in_output"] = val_include_stop
+            elif config.val_kwargs.get("stop", None) is not None:
                 sampling_params["include_stop_str_in_output"] = bool(
                     config.val_kwargs.get("include_stop_str_in_output", False)
                 )
