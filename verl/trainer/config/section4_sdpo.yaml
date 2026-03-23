@@ -28,6 +28,8 @@ actor_rollout_ref:
       include_environment_feedback: true
       environment_feedback_only_without_solution: true
       include_failed_attempt_in_feedback_only: true
+      failed_attempt_extract_code_only: true
+      failed_attempt_max_chars: ${oc.decode:${oc.env:FAILED_ATTEMPT_MAX_CHARS,1200}}
       max_reprompt_len: ${oc.decode:${oc.env:MAX_REPROMPT_LEN,10240}}
       reprompt_template: |
         {prompt}
@@ -46,7 +48,7 @@ actor_rollout_ref:
 
       failed_attempt_template: |
 
-        Reference unsuccessful attempt to repair (use only for debugging context; do not copy its mistakes or mention it):
+        Reference unsuccessful code to repair (use only for debugging context; do not copy it verbatim or mention it):
 
         {previous_attempt}
 

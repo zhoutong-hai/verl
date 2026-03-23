@@ -58,6 +58,11 @@ from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path, shou
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.debug import marked_timer
 from verl.utils.import_utils import load_class_from_fqn
+
+STRICT_PYTHON_BLOCK_PATTERN = re.compile(r"^\s*```python\s*\n(?P<code>.*?)```\s*$", re.DOTALL | re.IGNORECASE)
+STRICT_FENCED_BLOCK_PATTERN = re.compile(r"^\s*```(?:py)?\s*\n(?P<code>.*?)```\s*$", re.DOTALL | re.IGNORECASE)
+SEARCH_PYTHON_BLOCK_PATTERN = re.compile(r"```python\s*\n(?P<code>.*?)```", re.DOTALL | re.IGNORECASE)
+SEARCH_FENCED_BLOCK_PATTERN = re.compile(r"```(?:py)?\s*\n(?P<code>.*?)```", re.DOTALL | re.IGNORECASE)
 from verl.utils.metric import reduce_metrics
 from verl.utils.model import compute_position_id_with_mask
 from verl.utils.py_functional import rename_dict
@@ -908,6 +913,46 @@ class RayPPOTrainer:
     def _remove_thinking_trace(text: str) -> str:
         return re.sub(r"<think>.*?</think>\s*", "", text, flags=re.DOTALL)
 
+    @staticmethod
+    def _extract_reference_code(text: str) -> Optional[str]:
+        if not isinstance(text, str) or not text:
+            return None
+
+        for pattern in (
+            STRICT_PYTHON_BLOCK_PATTERN,
+            STRICT_FENCED_BLOCK_PATTERN,
+            SEARCH_PYTHON_BLOCK_PATTERN,
+            SEARCH_FENCED_BLOCK_PATTERN,
+        ):
+            match = pattern.search(text)
+            if match is None:
+                continue
+            code = match.group("code").strip()
+            if code:
+                return code
+        return None
+
+    def _prepare_failed_attempt_reference(
+        self, previous_attempt: str, self_distillation_cfg: SelfDistillationConfig
+    ) -> Optional[str]:
+        if not previous_attempt:
+            return None
+
+        sanitized_attempt = self._remove_thinking_trace(previous_attempt)
+        failed_attempt_max_chars = int(self_distillation_cfg.get("failed_attempt_max_chars", 0) or 0)
+
+        if self_distillation_cfg.get("failed_attempt_extract_code_only", True):
+            code = self._extract_reference_code(sanitized_attempt)
+            if code is None:
+                return None
+            if failed_attempt_max_chars > 0 and len(code) > failed_attempt_max_chars:
+                return None
+            sanitized_attempt = f"```python\n{code.rstrip()}\n```"
+        elif failed_attempt_max_chars > 0 and len(sanitized_attempt) > failed_attempt_max_chars:
+            return None
+
+        return sanitized_attempt
+
     def _get_solution(
         self,
         idx: int,
@@ -1066,6 +1111,8 @@ class RayPPOTrainer:
             for i in range(batch_size)
         ]
 
+        failed_attempt_used: list[bool] = []
+
         def _build_teacher_message(i: int) -> list[dict[str, Any]]:
             teacher_messages = deepcopy(prompt_contexts[i].messages)
             has_solution = solution_strs[i] is not None
@@ -1082,13 +1129,17 @@ class RayPPOTrainer:
                 )
 
             failed_attempt_section = ""
+            sanitized_failed_attempt = None
             if (
                 use_feedback
                 and not has_solution
                 and self_distillation_cfg.get("include_failed_attempt_in_feedback_only", False)
             ):
+                sanitized_failed_attempt = self._prepare_failed_attempt_reference(response_texts[i], self_distillation_cfg)
+
+            if sanitized_failed_attempt is not None:
                 failed_attempt_section = self_distillation_cfg.failed_attempt_template.format(
-                    previous_attempt=response_texts[i]
+                    previous_attempt=sanitized_failed_attempt
                 )
 
             feedback_section = ""
@@ -1106,6 +1157,7 @@ class RayPPOTrainer:
             else:
                 reprompt_text = prompt_texts[i]
 
+            failed_attempt_used.append(bool(sanitized_failed_attempt))
             teacher_messages[prompt_contexts[i].anchor_user_idx]["content"] = reprompt_text
             return teacher_messages
 
@@ -1174,6 +1226,7 @@ class RayPPOTrainer:
         num_with_solution = sum(1 for item in solution_strs if item is not None)
         num_with_solution_and_feedback = sum(1 for item in solution_and_feedback_used if item)
         num_with_feedback_only = sum(1 for item in feedback_only_used if item)
+        num_with_failed_attempt = sum(1 for item in failed_attempt_used if item)
         teacher_prompt_lengths = teacher_prompt["attention_mask"].sum(dim=1).to(torch.float32)
         metrics = {
             "self_distillation/success_group_fraction": len([uid for uid in uids if len(success_by_uid[uid]) > 0])
@@ -1185,6 +1238,7 @@ class RayPPOTrainer:
             "self_distillation/solution_used_fraction": num_with_solution / batch_size,
             "self_distillation/solution_and_feedback_fraction": num_with_solution_and_feedback / batch_size,
             "self_distillation/feedback_only_fraction": num_with_feedback_only / batch_size,
+            "self_distillation/failed_attempt_used_fraction": num_with_failed_attempt / batch_size,
             "self_distillation/teacher_prompt_length_mean": teacher_prompt_lengths.mean().item(),
             "self_distillation/teacher_prompt_length_max": teacher_prompt_lengths.max().item(),
         }

@@ -72,6 +72,8 @@ class SelfDistillationConfig(BaseConfig):
         "{feedback_raw}\n\n"
     )
     include_failed_attempt_in_feedback_only: bool = False
+    failed_attempt_extract_code_only: bool = True
+    failed_attempt_max_chars: int = 1200
     failed_attempt_template: str = (
         "\n"
         "Previous unsuccessful attempt to revise (use privately; do not copy its mistakes or mention it):\n\n"
@@ -111,6 +113,11 @@ class SelfDistillationConfig(BaseConfig):
             )
         if self.is_clip is not None and self.is_clip <= 0:
             raise ValueError(f"self_distillation.is_clip must be positive, got {self.is_clip}")
+        if self.failed_attempt_max_chars < 0:
+            raise ValueError(
+                "self_distillation.failed_attempt_max_chars must be non-negative, "
+                f"got {self.failed_attempt_max_chars}"
+            )
 
 
 @dataclass
