@@ -27,7 +27,7 @@ actor_rollout_ref:
       remove_thinking_from_demonstration: true
       include_environment_feedback: true
       environment_feedback_only_without_solution: true
-      include_failed_attempt_in_feedback_only: true
+      include_failed_attempt_in_feedback_only: ${oc.decode:${oc.env:INCLUDE_FAILED_ATTEMPT_IN_FEEDBACK_ONLY,false}}
       failed_attempt_extract_code_only: true
       failed_attempt_max_chars: ${oc.decode:${oc.env:FAILED_ATTEMPT_MAX_CHARS,1200}}
       max_reprompt_len: ${oc.decode:${oc.env:MAX_REPROMPT_LEN,10240}}
