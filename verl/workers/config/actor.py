@@ -81,6 +81,7 @@ class SelfDistillationConfig(BaseConfig):
     )
     include_environment_feedback: bool = False
     environment_feedback_only_without_solution: bool = False
+    custom_teacher_prompt_function: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
         if not 0.0 <= self.alpha <= 1.0:

@@ -56,7 +56,7 @@ from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path, should_save_ckpt_esi
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.debug import marked_timer
-from verl.utils.import_utils import load_class_from_fqn
+from verl.utils.import_utils import load_class_from_fqn, load_extern_object
 
 STRICT_PYTHON_BLOCK_PATTERN = re.compile(r"^\s*```python\s*\n(?P<code>.*?)```\s*$", re.DOTALL | re.IGNORECASE)
 STRICT_FENCED_BLOCK_PATTERN = re.compile(r"^\s*```(?:py)?\s*\n(?P<code>.*?)```\s*$", re.DOTALL | re.IGNORECASE)
@@ -347,6 +347,7 @@ class RayPPOTrainer:
             experiment_name=self.config.trainer.experiment_name,
         )
         self._debug_sdpo_dumped_steps: set[int] = set()
+        self._custom_teacher_prompt_fn, self._custom_teacher_prompt_kwargs = self._load_custom_teacher_prompt_function()
 
         # if ref_in_actor is True, the reference policy will be actor without lora applied
         self.ref_in_actor = (
@@ -362,6 +363,21 @@ class RayPPOTrainer:
         self.use_legacy_worker_impl = config.trainer.get("use_legacy_worker_impl", "auto")
 
         self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
+
+    def _load_custom_teacher_prompt_function(self) -> tuple[Optional[Any], dict[str, Any]]:
+        raw_self_distillation_cfg = self.config.actor_rollout_ref.actor.get("self_distillation", None)
+        if raw_self_distillation_cfg is None:
+            return None, {}
+
+        teacher_prompt_cfg = raw_self_distillation_cfg.get("custom_teacher_prompt_function", {}) or {}
+        module_path = teacher_prompt_cfg.get("path")
+        if not module_path:
+            return None, {}
+
+        fn_name = teacher_prompt_cfg.get("name", "build_teacher_prompt")
+        prompt_kwargs = dict(teacher_prompt_cfg.get("prompt_kwargs", {}) or {})
+        teacher_prompt_fn = load_extern_object(module_path=module_path, object_name=fn_name)
+        return teacher_prompt_fn, prompt_kwargs
 
     def _create_dataloader(self, train_dataset, val_dataset, collate_fn, train_sampler: Optional[Sampler]):
         """
@@ -740,6 +756,22 @@ class RayPPOTrainer:
             return "".join(text_parts)
         return str(content)
 
+    def _extract_sdpo_prompt_text(self, raw_prompt: Any) -> str:
+        if not isinstance(raw_prompt, (list, np.ndarray)):
+            raise ValueError(
+                "SDPO default teacher prompt construction requires structured raw_prompt messages. "
+                "Configure actor.self_distillation.custom_teacher_prompt_function for string prompt datasets."
+            )
+        messages = list(raw_prompt)
+        if len(messages) == 0:
+            raise ValueError("SDPO teacher prompt construction requires at least one prompt message.")
+        last_message = messages[-1]
+        if isinstance(last_message, dict):
+            content = last_message.get("content", "")
+        else:
+            content = getattr(last_message, "content", "")
+        return self._message_content_to_text(content)
+
     @staticmethod
     def _collect_feedback(
         include_environment_feedback: bool,
@@ -946,8 +978,20 @@ class RayPPOTrainer:
         response_mask = batch.batch["response_mask"]
         raw_prompts = batch.non_tensor_batch["raw_prompt"]
         response_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in responses]
-        prompt_texts = [self._message_content_to_text(list(messages)[-1]["content"]) for messages in raw_prompts]
         batch_size = batch.batch.batch_size[0]
+        extra_infos = batch.non_tensor_batch.get("extra_info", np.array([None] * batch_size, dtype=object))
+        custom_teacher_prompt_fn = self._custom_teacher_prompt_fn
+        if custom_teacher_prompt_fn is None:
+            prompt_texts: list[Optional[str]] = [
+                self._extract_sdpo_prompt_text(raw_prompts[i]) for i in range(batch_size)
+            ]
+        else:
+            prompt_texts = []
+            for i in range(batch_size):
+                try:
+                    prompt_texts.append(self._extract_sdpo_prompt_text(raw_prompts[i]))
+                except ValueError:
+                    prompt_texts.append(None)
 
         feedback_list = self._collect_feedback(
             include_environment_feedback=self_distillation_cfg.include_environment_feedback,
@@ -974,9 +1018,9 @@ class RayPPOTrainer:
         ]
 
         failed_attempt_used: list[bool] = []
+        apply_kwargs = dict(**(self.config.data.get("apply_chat_template_kwargs", {}) or {}))
 
-        def _build_teacher_message(i: int) -> list[dict[str, Any]]:
-            system_messages = deepcopy(list(raw_prompts[i])[:-1])
+        def _build_teacher_sections(i: int) -> tuple[str, str, str, bool, Optional[str]]:
             has_solution = solution_strs[i] is not None
             has_feedback = feedback_list[i] is not None
             feedback_only_without_solution = self_distillation_cfg.get(
@@ -1008,22 +1052,57 @@ class RayPPOTrainer:
             if use_feedback:
                 feedback_section = self_distillation_cfg.feedback_template.format(feedback_raw=feedback_list[i])
 
-            if use_feedback or has_solution:
-                reprompt_text = self_distillation_cfg.reprompt_template.format(
-                    prompt=prompt_texts[i],
-                    solution=solution_section,
-                    failed_attempt=failed_attempt_section,
-                    previous_attempt=response_texts[i],
-                    feedback=feedback_section,
+            use_guidance = use_feedback or has_solution
+            return solution_section, failed_attempt_section, feedback_section, use_guidance, sanitized_failed_attempt
+
+        if custom_teacher_prompt_fn is not None:
+            def _build_teacher_prompt_text(i: int) -> str:
+                solution_section, failed_attempt_section, feedback_section, use_guidance, sanitized_failed_attempt = (
+                    _build_teacher_sections(i)
                 )
-            else:
-                reprompt_text = prompt_texts[i]
+                failed_attempt_used.append(bool(sanitized_failed_attempt))
+                teacher_prompt_text = custom_teacher_prompt_fn(
+                    raw_prompt=raw_prompts[i],
+                    extra_info=extra_infos[i] if i < len(extra_infos) else None,
+                    prompt_text=prompt_texts[i],
+                    response_text=response_texts[i],
+                    solution_section=solution_section,
+                    feedback_section=feedback_section,
+                    failed_attempt_section=failed_attempt_section,
+                    use_guidance=use_guidance,
+                    self_distillation_cfg=self_distillation_cfg,
+                    tokenizer=self.tokenizer,
+                    apply_kwargs=apply_kwargs,
+                    **self._custom_teacher_prompt_kwargs,
+                )
+                if not isinstance(teacher_prompt_text, str):
+                    raise TypeError(
+                        "Custom teacher prompt function must return a string teacher prompt, "
+                        f"got {type(teacher_prompt_text)}."
+                    )
+                return teacher_prompt_text
+        else:
+            def _build_teacher_message(i: int) -> list[dict[str, Any]]:
+                solution_section, failed_attempt_section, feedback_section, use_guidance, sanitized_failed_attempt = (
+                    _build_teacher_sections(i)
+                )
+                prompt_text = prompt_texts[i]
+                if prompt_text is None:
+                    raise ValueError("Default SDPO teacher prompt construction requires a prompt text.")
+                system_messages = deepcopy(list(raw_prompts[i])[:-1])
+                if use_guidance:
+                    reprompt_text = self_distillation_cfg.reprompt_template.format(
+                        prompt=prompt_text,
+                        solution=solution_section,
+                        failed_attempt=failed_attempt_section,
+                        previous_attempt=response_texts[i],
+                        feedback=feedback_section,
+                    )
+                else:
+                    reprompt_text = prompt_text
+                failed_attempt_used.append(bool(sanitized_failed_attempt))
+                return system_messages + [{"role": "user", "content": reprompt_text}]
 
-            failed_attempt_used.append(bool(sanitized_failed_attempt))
-            return system_messages + [{"role": "user", "content": reprompt_text}]
-
-        messages = [_build_teacher_message(i) for i in range(batch_size)]
-        apply_kwargs = dict(**(self.config.data.get("apply_chat_template_kwargs", {}) or {}))
         truncation_side = self_distillation_cfg.get("reprompt_truncation", None)
         previous_truncation_side = getattr(self.tokenizer, "truncation_side", None)
         previous_padding_side = getattr(self.tokenizer, "padding_side", None)
@@ -1035,17 +1114,29 @@ class RayPPOTrainer:
         if previous_padding_side is not None:
             self.tokenizer.padding_side = "left"
         try:
-            teacher_prompt = self.tokenizer.apply_chat_template(
-                messages,
-                tokenize=True,
-                add_generation_prompt=True,
-                return_tensors="pt",
-                return_dict=True,
-                padding=True,
-                truncation=True,
-                max_length=self_distillation_cfg.max_reprompt_len,
-                **apply_kwargs,
-            )
+            if custom_teacher_prompt_fn is not None:
+                teacher_prompt_texts = [_build_teacher_prompt_text(i) for i in range(batch_size)]
+                teacher_prompt = self.tokenizer(
+                    teacher_prompt_texts,
+                    add_special_tokens=False,
+                    return_tensors="pt",
+                    padding=True,
+                    truncation=True,
+                    max_length=self_distillation_cfg.max_reprompt_len,
+                )
+            else:
+                messages = [_build_teacher_message(i) for i in range(batch_size)]
+                teacher_prompt = self.tokenizer.apply_chat_template(
+                    messages,
+                    tokenize=True,
+                    add_generation_prompt=True,
+                    return_tensors="pt",
+                    return_dict=True,
+                    padding=True,
+                    truncation=True,
+                    max_length=self_distillation_cfg.max_reprompt_len,
+                    **apply_kwargs,
+                )
         finally:
             if truncation_side in {"left", "right"} and previous_truncation_side is not None:
                 self.tokenizer.truncation_side = previous_truncation_side
