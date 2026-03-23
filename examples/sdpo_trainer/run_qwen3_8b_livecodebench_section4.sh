@@ -58,12 +58,29 @@ REQUIRE_WANDB="${REQUIRE_WANDB:-1}"
 FORCE_WANDB="${FORCE_WANDB:-0}"
 
 if [[ -z "${ROLLOUT_STOP_STRINGS:-}" ]]; then
-  ROLLOUT_STOP_STRINGS=$'["\n```"]'
+  ROLLOUT_STOP_STRINGS='["\\n```"]'
 fi
 
 if [[ -z "${VAL_STOP_STRINGS:-}" ]]; then
-  VAL_STOP_STRINGS=$'["\n```"]'
+  VAL_STOP_STRINGS='["\\n```"]'
 fi
+
+python3 - <<'PY'
+import json
+import os
+import sys
+
+for name in ("ROLLOUT_STOP_STRINGS", "VAL_STOP_STRINGS"):
+    value = os.environ.get(name)
+    if not value:
+        continue
+    try:
+        parsed = json.loads(value)
+    except Exception as exc:
+        raise SystemExit(f"{name} must be a JSON array of strings, got {value!r}: {exc}") from exc
+    if not isinstance(parsed, list) or any(not isinstance(item, str) for item in parsed):
+        raise SystemExit(f"{name} must decode to a JSON array of strings, got {parsed!r}")
+PY
 
 if [[ "$REQUIRE_WANDB" == "1" && "$FORCE_WANDB" != "1" && -z "${WANDB_API_KEY:-}" ]]; then
   echo "WANDB_API_KEY is required for the Section 4 launch path." >&2
