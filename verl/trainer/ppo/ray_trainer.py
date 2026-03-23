@@ -18,7 +18,6 @@ PPO Trainer with Ray-based single controller.
 This trainer supports model-agonistic model initialization with huggingface
 """
 
-import importlib
 import json
 import os
 import re
@@ -129,23 +128,6 @@ class ResourcePoolManager:
             raise ValueError(
                 f"Total available GPUs {total_available_gpus} is less than total desired GPUs {total_required_gpus}"
             )
-
-
-@dataclass
-class TeacherPromptContext:
-    """Prompt context used to rebuild SDPO teacher prompts.
-
-    `messages` is the full prompt-side conversation prior to concatenating the sampled response.
-    `anchor_user_idx` identifies the user turn whose content should be replaced by the SDPO reprompt.
-    `use_default_chat_template` is used for private Arrakis-style payloads where rollout used a noop
-    template over a rendered prompt string, but teacher scoring must rebuild a real chat-formatted
-    prompt from recovered messages.
-    """
-
-    messages: list[dict[str, Any]]
-    prompt_text: str
-    anchor_user_idx: int
-    use_default_chat_template: bool = False
 
 
 def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, kl_penalty="kl"):
@@ -759,121 +741,6 @@ class RayPPOTrainer:
         return str(content)
 
     @staticmethod
-    def _message_to_dict(message: Any) -> dict[str, Any]:
-        if isinstance(message, dict):
-            return deepcopy(message)
-        if hasattr(message, "model_dump"):
-            return message.model_dump(exclude_none=True)
-        if hasattr(message, "dict"):
-            return message.dict()
-
-        role = getattr(message, "role", None)
-        content = getattr(message, "content", None)
-        if role is None:
-            raise TypeError(f"Unsupported message type for SDPO prompt recovery: {type(message)}")
-
-        converted = {"role": role, "content": content}
-        for key in ("name", "tool_calls", "tool_call_id"):
-            value = getattr(message, key, None)
-            if value is not None:
-                converted[key] = value
-        return converted
-
-    @classmethod
-    def _find_last_user_idx(cls, messages: list[dict[str, Any]]) -> Optional[int]:
-        for idx in range(len(messages) - 1, -1, -1):
-            if messages[idx].get("role") == "user":
-                return idx
-        return None
-
-    @classmethod
-    def _recover_messages_from_payload(cls, payload: str) -> list[dict[str, Any]]:
-        """Recover structured messages from a rendered payload string when private helpers exist.
-
-        This path is used for Arrakis-style datasets whose rollout prompt is already rendered into
-        a Llama payload string. GRPO rollout can use that string directly, but SDPO teacher
-        construction needs a structured prompt view so it can replace the last real user turn.
-        """
-
-        helper_errors: list[str] = []
-
-        try:
-            module = importlib.import_module("common_utils.generic_message_format")
-            from_llama3 = getattr(module, "from_llama3")
-            generic = from_llama3(payload)
-            messages = [cls._message_to_dict(message) for message in generic.messages]
-            if messages:
-                return messages
-            helper_errors.append("common_utils.generic_message_format.from_llama3 returned no messages")
-        except Exception as exc:
-            helper_errors.append(f"from_llama3 failed: {exc}")
-
-        try:
-            module = importlib.import_module("common_utils.lm_payload_utils")
-            get_all_messages_from_payload = getattr(module, "get_all_messages_from_payload")
-            messages = [cls._message_to_dict(message) for message in get_all_messages_from_payload(payload)]
-            if messages:
-                return messages
-            helper_errors.append("common_utils.lm_payload_utils.get_all_messages_from_payload returned no messages")
-        except Exception as exc:
-            helper_errors.append(f"get_all_messages_from_payload failed: {exc}")
-
-        error_detail = "; ".join(helper_errors) if helper_errors else "no parser helpers available"
-        raise ValueError(f"Unable to recover structured messages from rendered payload for SDPO: {error_detail}")
-
-    def _prepare_teacher_prompt_context(self, raw_prompt: Any, extra_info: Any = None) -> TeacherPromptContext:
-        if isinstance(raw_prompt, list | np.ndarray):
-            messages = [self._message_to_dict(message) for message in list(raw_prompt)]
-            anchor_user_idx = self._find_last_user_idx(messages)
-            if anchor_user_idx is None:
-                raise ValueError("SDPO teacher construction requires a user turn in raw_prompt messages.")
-            prompt_text = self._message_content_to_text(messages[anchor_user_idx].get("content", ""))
-            return TeacherPromptContext(
-                messages=messages,
-                prompt_text=prompt_text,
-                anchor_user_idx=anchor_user_idx,
-                use_default_chat_template=False,
-            )
-
-        if isinstance(raw_prompt, str):
-            payload = raw_prompt
-            if isinstance(extra_info, dict):
-                payload = extra_info.get("payload") or raw_prompt
-            messages = self._recover_messages_from_payload(str(payload))
-            anchor_user_idx = self._find_last_user_idx(messages)
-            if anchor_user_idx is None:
-                raise ValueError("Recovered payload messages do not contain a user turn for SDPO teacher prompt.")
-            prompt_text = self._message_content_to_text(messages[anchor_user_idx].get("content", ""))
-            return TeacherPromptContext(
-                messages=messages,
-                prompt_text=prompt_text,
-                anchor_user_idx=anchor_user_idx,
-                use_default_chat_template=True,
-            )
-
-        raise ValueError(f"Unsupported raw_prompt type for SDPO teacher construction: {type(raw_prompt)}")
-
-    def _render_teacher_prompt_text(
-        self,
-        messages: list[dict[str, Any]],
-        *,
-        use_default_chat_template: bool,
-        apply_kwargs: dict[str, Any],
-    ) -> str:
-        render_kwargs = dict(apply_kwargs)
-        if use_default_chat_template:
-            # Rollout may intentionally pass rendered prompt strings through a noop template.
-            # Once SDPO has recovered structured messages, teacher scoring should use the model's
-            # real chat template instead of replaying the noop renderer.
-            render_kwargs.pop("chat_template", None)
-        return self.tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True,
-            **render_kwargs,
-        )
-
-    @staticmethod
     def _collect_feedback(
         include_environment_feedback: bool,
         reward_extra_infos_dict: Optional[dict[str, Any]],
@@ -1079,13 +946,8 @@ class RayPPOTrainer:
         response_mask = batch.batch["response_mask"]
         raw_prompts = batch.non_tensor_batch["raw_prompt"]
         response_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in responses]
+        prompt_texts = [self._message_content_to_text(list(messages)[-1]["content"]) for messages in raw_prompts]
         batch_size = batch.batch.batch_size[0]
-        extra_infos = batch.non_tensor_batch.get("extra_info", np.array([None] * batch_size, dtype=object))
-        prompt_contexts = [
-            self._prepare_teacher_prompt_context(raw_prompts[i], extra_infos[i] if i < len(extra_infos) else None)
-            for i in range(batch_size)
-        ]
-        prompt_texts = [context.prompt_text for context in prompt_contexts]
 
         feedback_list = self._collect_feedback(
             include_environment_feedback=self_distillation_cfg.include_environment_feedback,
@@ -1114,7 +976,7 @@ class RayPPOTrainer:
         failed_attempt_used: list[bool] = []
 
         def _build_teacher_message(i: int) -> list[dict[str, Any]]:
-            teacher_messages = deepcopy(prompt_contexts[i].messages)
+            system_messages = deepcopy(list(raw_prompts[i])[:-1])
             has_solution = solution_strs[i] is not None
             has_feedback = feedback_list[i] is not None
             feedback_only_without_solution = self_distillation_cfg.get(
@@ -1158,8 +1020,7 @@ class RayPPOTrainer:
                 reprompt_text = prompt_texts[i]
 
             failed_attempt_used.append(bool(sanitized_failed_attempt))
-            teacher_messages[prompt_contexts[i].anchor_user_idx]["content"] = reprompt_text
-            return teacher_messages
+            return system_messages + [{"role": "user", "content": reprompt_text}]
 
         messages = [_build_teacher_message(i) for i in range(batch_size)]
         apply_kwargs = dict(**(self.config.data.get("apply_chat_template_kwargs", {}) or {}))
@@ -1174,21 +1035,16 @@ class RayPPOTrainer:
         if previous_padding_side is not None:
             self.tokenizer.padding_side = "left"
         try:
-            teacher_prompt_texts = [
-                self._render_teacher_prompt_text(
-                    messages[i],
-                    use_default_chat_template=prompt_contexts[i].use_default_chat_template,
-                    apply_kwargs=apply_kwargs,
-                )
-                for i in range(batch_size)
-            ]
-            teacher_prompt = self.tokenizer(
-                teacher_prompt_texts,
-                add_special_tokens=False,
+            teacher_prompt = self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=True,
+                add_generation_prompt=True,
                 return_tensors="pt",
+                return_dict=True,
                 padding=True,
                 truncation=True,
                 max_length=self_distillation_cfg.max_reprompt_len,
+                **apply_kwargs,
             )
         finally:
             if truncation_side in {"left", "right"} and previous_truncation_side is not None:
