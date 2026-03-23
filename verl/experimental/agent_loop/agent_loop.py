@@ -430,6 +430,11 @@ class AgentLoopWorkerBase:
             repetition_penalty=config.get("repetition_penalty", 1.0),
             logprobs=config.calculate_log_probs,
         )
+        if config.get("stop", None) is not None:
+            sampling_params["stop"] = list(config.stop)
+            sampling_params["include_stop_str_in_output"] = bool(
+                config.get("include_stop_str_in_output", False)
+            )
 
         # override sampling params for validation
         if batch.meta_info.get("validate", False):
@@ -437,6 +442,11 @@ class AgentLoopWorkerBase:
             sampling_params["temperature"] = config.val_kwargs.temperature
             if config.val_kwargs.get("repetition_penalty", None) is not None:
                 sampling_params["repetition_penalty"] = config.val_kwargs.repetition_penalty
+            if config.val_kwargs.get("stop", None) is not None:
+                sampling_params["stop"] = list(config.val_kwargs.stop)
+                sampling_params["include_stop_str_in_output"] = bool(
+                    config.val_kwargs.get("include_stop_str_in_output", False)
+                )
 
         # by default, we assume it's a single turn agent
         if "agent_name" not in batch.non_tensor_batch:
