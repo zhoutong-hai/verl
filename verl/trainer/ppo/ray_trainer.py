@@ -521,11 +521,19 @@ class RayPPOTrainer:
         step_dir = os.path.join(debug_dir, f"step_{self.global_steps:04d}")
         os.makedirs(step_dir, exist_ok=True)
 
-        def _slice_dataproto(data: Optional[DataProto], batch_keys: list[str], filename: str) -> Optional[dict[str, Any]]:
+        def _slice_dataproto(
+            data: Optional[DataProto],
+            batch_keys: list[str],
+            filename: str,
+            non_tensor_batch_keys: Optional[list[str]] = None,
+        ) -> Optional[dict[str, Any]]:
             if data is None:
                 return None
             existing_batch_keys = [key for key in batch_keys if data.batch is not None and key in data.batch.keys()]
-            sliced = data.select(batch_keys=existing_batch_keys, non_tensor_batch_keys=[]).to("cpu")
+            existing_non_tensor_keys = [
+                key for key in (non_tensor_batch_keys or []) if key in (data.non_tensor_batch or {})
+            ]
+            sliced = data.select(batch_keys=existing_batch_keys, non_tensor_batch_keys=existing_non_tensor_keys).to("cpu")
             if max_sequences > 0:
                 sliced = sliced[:max_sequences]
             filepath = os.path.join(step_dir, filename)
@@ -534,6 +542,7 @@ class RayPPOTrainer:
                 "path": filepath,
                 "num_rows": len(sliced),
                 "batch_keys": existing_batch_keys,
+                "non_tensor_batch_keys": existing_non_tensor_keys,
                 "shapes": {
                     key: list(sliced.batch[key].shape) for key in existing_batch_keys if sliced.batch is not None
                 },
@@ -582,7 +591,12 @@ class RayPPOTrainer:
             ),
             "dump_max_sequences": max_sequences,
             "trainer_batch": _slice_dataproto(batch, common_batch_keys, "trainer_batch.pkl"),
-            "teacher_batch": _slice_dataproto(teacher_batch, teacher_batch_keys, "teacher_batch.pkl"),
+            "teacher_batch": _slice_dataproto(
+                teacher_batch,
+                teacher_batch_keys,
+                "teacher_batch.pkl",
+                non_tensor_batch_keys=["teacher_prompt"],
+            ),
             "teacher_targets": _slice_dataproto(teacher_targets, teacher_target_keys, "teacher_targets.pkl"),
         }
         summary_path = os.path.join(step_dir, "trainer_summary.json")
@@ -621,7 +635,12 @@ class RayPPOTrainer:
             print("[score]", score)
 
     def _log_rollout_data(
-        self, batch: DataProto, reward_extra_infos_dict: dict, timing_raw: dict, rollout_data_dir: str
+        self,
+        batch: DataProto,
+        reward_extra_infos_dict: dict,
+        timing_raw: dict,
+        rollout_data_dir: str,
+        extra_dump_infos_dict: Optional[dict[str, list[Any]]] = None,
     ):
         """Log rollout data to disk.
         Args:
@@ -637,6 +656,9 @@ class RayPPOTrainer:
             sample_gts = [item.non_tensor_batch.get("reward_model", {}).get("ground_truth", None) for item in batch]
 
             reward_extra_infos_to_dump = reward_extra_infos_dict.copy()
+            if extra_dump_infos_dict:
+                for key, values in extra_dump_infos_dict.items():
+                    reward_extra_infos_to_dump[key] = values
             if "request_id" in batch.non_tensor_batch:
                 reward_extra_infos_dict.setdefault(
                     "request_id",
@@ -980,6 +1002,8 @@ class RayPPOTrainer:
         response_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in responses]
         batch_size = batch.batch.batch_size[0]
         extra_infos = batch.non_tensor_batch.get("extra_info", np.array([None] * batch_size, dtype=object))
+        dump_teacher_prompt_text = bool(self_distillation_cfg.get("dump_teacher_prompt_text", False))
+        dump_teacher_prompt_max_chars = int(self_distillation_cfg.get("dump_teacher_prompt_max_chars", 0) or 0)
         custom_teacher_prompt_fn = self._custom_teacher_prompt_fn
         if custom_teacher_prompt_fn is None:
             prompt_texts: list[Optional[str]] = [
@@ -992,6 +1016,11 @@ class RayPPOTrainer:
                     prompt_texts.append(self._extract_sdpo_prompt_text(raw_prompts[i]))
                 except ValueError:
                     prompt_texts.append(None)
+
+        def _prepare_teacher_prompt_for_dump(text: str) -> str:
+            if dump_teacher_prompt_max_chars <= 0 or len(text) <= dump_teacher_prompt_max_chars:
+                return text
+            return "...<truncated prefix>...\n" + text[-dump_teacher_prompt_max_chars:]
 
         feedback_list = self._collect_feedback(
             include_environment_feedback=self_distillation_cfg.include_environment_feedback,
@@ -1106,6 +1135,7 @@ class RayPPOTrainer:
         truncation_side = self_distillation_cfg.get("reprompt_truncation", None)
         previous_truncation_side = getattr(self.tokenizer, "truncation_side", None)
         previous_padding_side = getattr(self.tokenizer, "padding_side", None)
+        teacher_prompt_texts_for_dump: Optional[list[str]] = None
         if truncation_side in {"left", "right"}:
             self.tokenizer.truncation_side = truncation_side
         # Left-pad teacher prompts so the token immediately before the response window is always a
@@ -1116,6 +1146,10 @@ class RayPPOTrainer:
         try:
             if custom_teacher_prompt_fn is not None:
                 teacher_prompt_texts = [_build_teacher_prompt_text(i) for i in range(batch_size)]
+                if dump_teacher_prompt_text:
+                    teacher_prompt_texts_for_dump = [
+                        _prepare_teacher_prompt_for_dump(text) for text in teacher_prompt_texts
+                    ]
                 teacher_prompt = self.tokenizer(
                     teacher_prompt_texts,
                     add_special_tokens=False,
@@ -1126,6 +1160,18 @@ class RayPPOTrainer:
                 )
             else:
                 messages = [_build_teacher_message(i) for i in range(batch_size)]
+                if dump_teacher_prompt_text:
+                    teacher_prompt_texts_for_dump = [
+                        _prepare_teacher_prompt_for_dump(
+                            self.tokenizer.apply_chat_template(
+                                message,
+                                tokenize=False,
+                                add_generation_prompt=True,
+                                **apply_kwargs,
+                            )
+                        )
+                        for message in messages
+                    ]
                 teacher_prompt = self.tokenizer.apply_chat_template(
                     messages,
                     tokenize=True,
@@ -1198,7 +1244,10 @@ class RayPPOTrainer:
                     "teacher_attention_mask": teacher_attention_mask,
                     "teacher_position_ids": teacher_position_ids,
                     "self_distillation_mask": self_distillation_mask,
-                }
+                },
+                non_tensors={"teacher_prompt": teacher_prompt_texts_for_dump}
+                if teacher_prompt_texts_for_dump is not None
+                else None,
             ),
             metrics,
         )
@@ -2221,10 +2270,22 @@ class RayPPOTrainer:
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                         metrics.update(actor_output_metrics)
 
+                    extra_dump_infos_dict = None
+                    if teacher_batch_for_debug is not None and "teacher_prompt" in teacher_batch_for_debug.non_tensor_batch:
+                        extra_dump_infos_dict = {
+                            "teacher_prompt": teacher_batch_for_debug.non_tensor_batch["teacher_prompt"].tolist()
+                        }
+
                     # Log rollout generations if enabled
                     rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)
                     if rollout_data_dir:
-                        self._log_rollout_data(batch, reward_extra_infos_dict, timing_raw, rollout_data_dir)
+                        self._log_rollout_data(
+                            batch,
+                            reward_extra_infos_dict,
+                            timing_raw,
+                            rollout_data_dir,
+                            extra_dump_infos_dict=extra_dump_infos_dict,
+                        )
 
                 # validate
                 if (

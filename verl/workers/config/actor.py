@@ -82,6 +82,8 @@ class SelfDistillationConfig(BaseConfig):
     include_environment_feedback: bool = False
     environment_feedback_only_without_solution: bool = False
     custom_teacher_prompt_function: dict[str, Any] = field(default_factory=dict)
+    dump_teacher_prompt_text: bool = False
+    dump_teacher_prompt_max_chars: int = 0
 
     def __post_init__(self):
         if not 0.0 <= self.alpha <= 1.0:
@@ -118,6 +120,11 @@ class SelfDistillationConfig(BaseConfig):
             raise ValueError(
                 "self_distillation.failed_attempt_max_chars must be non-negative, "
                 f"got {self.failed_attempt_max_chars}"
+            )
+        if self.dump_teacher_prompt_max_chars < 0:
+            raise ValueError(
+                "self_distillation.dump_teacher_prompt_max_chars must be non-negative, "
+                f"got {self.dump_teacher_prompt_max_chars}"
             )
 
 
