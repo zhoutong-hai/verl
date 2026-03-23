@@ -47,7 +47,7 @@ def _make_internal_output(response_logprobs):
     )
 
 
-def test_single_turn_truncation_falls_back_when_logprobs_cannot_align():
+def test_single_turn_truncation_reencodes_first_block_when_logprobs_cannot_align():
     loop = object.__new__(SingleTurnAgentLoop)
     loop.tokenizer = FakeTokenizer()
     loop.truncate_to_first_code_block = True
@@ -55,8 +55,8 @@ def test_single_turn_truncation_falls_back_when_logprobs_cannot_align():
     output = types.SimpleNamespace(token_ids=[1, 2, 3], log_probs=[-0.1, -0.2, -0.3])
     response_ids, response_logprobs = loop._maybe_truncate_to_first_code_block(output)
 
-    assert response_ids == output.token_ids
-    assert response_logprobs == output.log_probs
+    assert response_ids == [10, 11, 12]
+    assert response_logprobs is None
 
 
 def test_postprocess_skips_rollout_log_probs_for_mixed_batches():

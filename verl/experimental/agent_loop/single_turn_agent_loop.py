@@ -23,7 +23,7 @@ from verl.utils.profiler import simple_timer
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
-FIRST_CODE_BLOCK_PATTERN = re.compile(r"^\s*```(?:python|py)?\s*\n.*?```", re.DOTALL | re.IGNORECASE)
+FIRST_CODE_BLOCK_PATTERN = re.compile(r"```(?:python|py)?\s*\n.*?```", re.DOTALL | re.IGNORECASE)
 
 
 @register("single_turn_agent")
@@ -41,7 +41,7 @@ class SingleTurnAgentLoop(AgentLoopBase):
             return output.token_ids, output.log_probs
 
         response_text = self.tokenizer.decode(output.token_ids, skip_special_tokens=True)
-        match = FIRST_CODE_BLOCK_PATTERN.match(response_text)
+        match = FIRST_CODE_BLOCK_PATTERN.search(response_text)
         if match is None:
             return output.token_ids, output.log_probs
 
@@ -74,8 +74,8 @@ class SingleTurnAgentLoop(AgentLoopBase):
             if prefix_text == truncated_text:
                 return output.token_ids[:prefix_len], output.log_probs[:prefix_len]
 
-        logger.debug("Skipping code-block truncation because token/logprob prefix alignment failed.")
-        return output.token_ids, output.log_probs
+        logger.debug("Normalizing to the first fenced code block by re-encoding and dropping rollout logprobs.")
+        return truncated_token_ids, None
 
     async def run(self, sampling_params: dict[str, Any], **kwargs) -> AgentLoopOutput:
         messages = list(kwargs["raw_prompt"])
