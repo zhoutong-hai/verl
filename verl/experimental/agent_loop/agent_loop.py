@@ -427,7 +427,7 @@ class AgentLoopWorkerBase:
         sampling_params = dict(
             temperature=config.temperature,
             top_p=config.top_p,
-            repetition_penalty=1.0,
+            repetition_penalty=config.get("repetition_penalty", 1.0),
             logprobs=config.calculate_log_probs,
         )
 
@@ -435,6 +435,8 @@ class AgentLoopWorkerBase:
         if batch.meta_info.get("validate", False):
             sampling_params["top_p"] = config.val_kwargs.top_p
             sampling_params["temperature"] = config.val_kwargs.temperature
+            if config.val_kwargs.get("repetition_penalty", None) is not None:
+                sampling_params["repetition_penalty"] = config.val_kwargs.repetition_penalty
 
         # by default, we assume it's a single turn agent
         if "agent_name" not in batch.non_tensor_batch:
