@@ -81,9 +81,6 @@ class SelfDistillationConfig(BaseConfig):
     )
     include_environment_feedback: bool = False
     environment_feedback_only_without_solution: bool = False
-    solution_gate_min_scenario_score: Optional[float] = None
-    solution_gate_require_no_veto_failure: bool = False
-    solution_gate_min_response_length: int = 0
     custom_teacher_prompt_function: dict[str, Any] = field(default_factory=dict)
     dump_teacher_prompt_text: bool = False
     dump_teacher_prompt_max_chars: int = 0
@@ -123,19 +120,6 @@ class SelfDistillationConfig(BaseConfig):
             raise ValueError(
                 "self_distillation.failed_attempt_max_chars must be non-negative, "
                 f"got {self.failed_attempt_max_chars}"
-            )
-        if (
-            self.solution_gate_min_scenario_score is not None
-            and not 0.0 <= self.solution_gate_min_scenario_score <= 1.0
-        ):
-            raise ValueError(
-                "self_distillation.solution_gate_min_scenario_score must be in [0,1], "
-                f"got {self.solution_gate_min_scenario_score}"
-            )
-        if self.solution_gate_min_response_length < 0:
-            raise ValueError(
-                "self_distillation.solution_gate_min_response_length must be non-negative, "
-                f"got {self.solution_gate_min_response_length}"
             )
         if self.dump_teacher_prompt_max_chars < 0:
             raise ValueError(

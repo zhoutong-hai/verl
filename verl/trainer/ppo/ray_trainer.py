@@ -808,108 +808,19 @@ class RayPPOTrainer:
                     feedback_list[i] = raw_feedback[i]
         return feedback_list
 
-    @staticmethod
-    def _get_reward_extra_info_values(
-        reward_extra_infos_dict: Optional[dict[str, Any]],
-        key: str,
-        batch_size: int,
-        *,
-        required: bool = False,
-        requirement_name: Optional[str] = None,
-    ) -> list[Any]:
-        if reward_extra_infos_dict is None or key not in reward_extra_infos_dict:
-            if required:
-                raise ValueError(
-                    f"SDPO {requirement_name or key} requires reward_extra_info['{key}'] to be available."
-                )
-            return [None] * batch_size
-
-        values = reward_extra_infos_dict[key]
-        if isinstance(values, np.ndarray):
-            values = values.tolist()
-        elif not isinstance(values, list):
-            values = list(values)
-
-        if len(values) < batch_size:
-            values = list(values) + [None] * (batch_size - len(values))
-        return list(values[:batch_size])
-
     def _collect_solutions_by_uid(
         self,
         batch: DataProto,
         reward_tensor: torch.Tensor,
         response_texts: list[str],
         success_reward_threshold: float,
-        reward_extra_infos_dict: Optional[dict[str, Any]] = None,
-        solution_gate_min_scenario_score: Optional[float] = None,
-        solution_gate_require_no_veto_failure: bool = False,
-        solution_gate_min_response_length: int = 0,
-    ) -> tuple[dict[Any, list[int]], dict[str, float]]:
+    ) -> dict[Any, list[int]]:
         seq_scores = reward_tensor.sum(dim=-1).detach().cpu().numpy()
-        batch_size = len(response_texts)
         uids = batch.non_tensor_batch["uid"]
         success_by_uid: dict[Any, list[int]] = defaultdict(list)
-        scenario_scores = self._get_reward_extra_info_values(
-            reward_extra_infos_dict,
-            "scenario_score",
-            batch_size,
-            required=solution_gate_min_scenario_score is not None,
-            requirement_name="solution_gate_min_scenario_score",
-        )
-        veto_failures = self._get_reward_extra_info_values(
-            reward_extra_infos_dict,
-            "has_veto_failure",
-            batch_size,
-            required=solution_gate_require_no_veto_failure,
-            requirement_name="solution_gate_require_no_veto_failure",
-        )
-        response_lengths = self._get_reward_extra_info_values(
-            reward_extra_infos_dict,
-            "response_length",
-            batch_size,
-            required=solution_gate_min_response_length > 0,
-            requirement_name="solution_gate_min_response_length",
-        )
-
-        rejected_by_reward = 0
-        rejected_by_scenario = 0
-        rejected_by_veto = 0
-        rejected_by_response_length = 0
         for idx, uid in enumerate(uids):
             if seq_scores[idx] >= success_reward_threshold:
-                if solution_gate_min_scenario_score is not None:
-                    scenario_score = scenario_scores[idx]
-                    try:
-                        scenario_score = float(scenario_score)
-                    except (TypeError, ValueError):
-                        scenario_score = None
-                    if scenario_score is None or scenario_score < solution_gate_min_scenario_score:
-                        rejected_by_scenario += 1
-                        continue
-
-                if solution_gate_require_no_veto_failure:
-                    has_veto_failure = veto_failures[idx]
-                    try:
-                        has_veto_failure = float(has_veto_failure)
-                    except (TypeError, ValueError):
-                        has_veto_failure = None
-                    if has_veto_failure is None or has_veto_failure > 0:
-                        rejected_by_veto += 1
-                        continue
-
-                if solution_gate_min_response_length > 0:
-                    response_length = response_lengths[idx]
-                    try:
-                        response_length = int(response_length)
-                    except (TypeError, ValueError):
-                        response_length = None
-                    if response_length is None or response_length < solution_gate_min_response_length:
-                        rejected_by_response_length += 1
-                        continue
-
                 success_by_uid[uid].append(idx)
-            else:
-                rejected_by_reward += 1
         # Keep the chosen demonstration stable even if batch balancing reorders
         # successful siblings differently across backends.
         for uid, indices in success_by_uid.items():
@@ -917,17 +828,7 @@ class RayPPOTrainer:
                 indices,
                 key=lambda j: (-float(seq_scores[j]), len(response_texts[j]), response_texts[j]),
             )
-        total_successes = sum(len(indices) for indices in success_by_uid.values())
-        metrics = {
-            "self_distillation/solution_candidate_fraction": total_successes / max(batch_size, 1),
-            "self_distillation/solution_rejected_by_reward_fraction": rejected_by_reward / max(batch_size, 1),
-            "self_distillation/solution_rejected_by_scenario_fraction": rejected_by_scenario / max(batch_size, 1),
-            "self_distillation/solution_rejected_by_veto_fraction": rejected_by_veto / max(batch_size, 1),
-            "self_distillation/solution_rejected_by_response_length_fraction": (
-                rejected_by_response_length / max(batch_size, 1)
-            ),
-        }
-        return success_by_uid, metrics
+        return success_by_uid
 
     @staticmethod
     def _remove_thinking_trace(text: str) -> str:
@@ -1127,17 +1028,11 @@ class RayPPOTrainer:
             batch_size=batch_size,
         )
 
-        success_by_uid, solution_gate_metrics = self._collect_solutions_by_uid(
+        success_by_uid = self._collect_solutions_by_uid(
             batch,
             reward_tensor,
             response_texts,
             success_reward_threshold=self_distillation_cfg.success_reward_threshold,
-            reward_extra_infos_dict=reward_extra_infos_dict,
-            solution_gate_min_scenario_score=self_distillation_cfg.get("solution_gate_min_scenario_score", None),
-            solution_gate_require_no_veto_failure=self_distillation_cfg.get(
-                "solution_gate_require_no_veto_failure", False
-            ),
-            solution_gate_min_response_length=self_distillation_cfg.get("solution_gate_min_response_length", 0),
         )
         solution_strs = [
             self._get_solution(
@@ -1340,7 +1235,6 @@ class RayPPOTrainer:
             "self_distillation/teacher_prompt_length_mean": teacher_prompt_lengths.mean().item(),
             "self_distillation/teacher_prompt_length_max": teacher_prompt_lengths.max().item(),
         }
-        metrics.update(solution_gate_metrics)
         return (
             DataProto.from_dict(
                 tensors={
