@@ -499,6 +499,45 @@ class RayPPOTrainer:
 
         print(f"Dumped generations to {filename}")
 
+    def _decode_response_debug_info(self, responses: torch.Tensor, response_mask: torch.Tensor) -> dict[str, list[Any]]:
+        """Decode valid response spans with and without special-token stripping."""
+        eos_token_id = self.tokenizer.eos_token_id
+        if isinstance(eos_token_id, int):
+            eos_token_ids = {eos_token_id}
+        else:
+            eos_token_ids = set(eos_token_id or [])
+
+        outputs: list[str] = []
+        raw_outputs: list[str] = []
+        first_token_ids: list[Optional[int]] = []
+        first_token_texts: list[str] = []
+        first_token_is_eos: list[bool] = []
+        blank_outputs: list[bool] = []
+
+        for ids, mask in zip(responses, response_mask, strict=True):
+            valid_ids = ids[mask.bool()].tolist()
+            output = self.tokenizer.decode(valid_ids, skip_special_tokens=True)
+            raw_output = self.tokenizer.decode(valid_ids, skip_special_tokens=False)
+            first_token_id = int(valid_ids[0]) if valid_ids else None
+
+            outputs.append(output)
+            raw_outputs.append(raw_output)
+            first_token_ids.append(first_token_id)
+            first_token_texts.append(
+                self.tokenizer.decode([first_token_id], skip_special_tokens=False) if first_token_id is not None else ""
+            )
+            first_token_is_eos.append(first_token_id in eos_token_ids if first_token_id is not None else False)
+            blank_outputs.append(output.strip() == "")
+
+        return {
+            "output": outputs,
+            "raw_output": raw_outputs,
+            "first_response_token_id": first_token_ids,
+            "first_response_token_text": first_token_texts,
+            "first_response_token_is_eos": first_token_is_eos,
+            "blank_output": blank_outputs,
+        }
+
     def _maybe_dump_sdpo_debug_batch(
         self,
         batch: DataProto,
@@ -651,11 +690,13 @@ class RayPPOTrainer:
         """
         with marked_timer("dump_rollout_generations", timing_raw, color="green"):
             inputs = self.tokenizer.batch_decode(batch.batch["prompts"], skip_special_tokens=True)
-            outputs = self.tokenizer.batch_decode(batch.batch["responses"], skip_special_tokens=True)
+            response_debug = self._decode_response_debug_info(batch.batch["responses"], batch.batch["response_mask"])
+            outputs = response_debug.pop("output")
             scores = batch.batch["token_level_scores"].sum(-1).cpu().tolist()
             sample_gts = [item.non_tensor_batch.get("reward_model", {}).get("ground_truth", None) for item in batch]
 
             reward_extra_infos_to_dump = reward_extra_infos_dict.copy()
+            reward_extra_infos_to_dump.update(response_debug)
             if extra_dump_infos_dict:
                 for key, values in extra_dump_infos_dict.items():
                     reward_extra_infos_to_dump[key] = values
@@ -1276,10 +1317,15 @@ class RayPPOTrainer:
         # Lists to collect samples for the table
         sample_inputs = []
         sample_outputs = []
+        sample_raw_outputs = []
         sample_gts = []
         sample_scores = []
         sample_turns = []
         sample_uids = []
+        sample_first_token_ids = []
+        sample_first_token_texts = []
+        sample_first_token_is_eos = []
+        sample_blank_outputs = []
 
         for test_data in self.val_dataloader:
             test_batch = DataProto.from_single_dict(test_data)
@@ -1332,9 +1378,17 @@ class RayPPOTrainer:
             print("validation generation end")
 
             # Store generated outputs
-            output_ids = test_output_gen_batch.batch["responses"]
-            output_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in output_ids]
+            response_debug = self._decode_response_debug_info(
+                test_output_gen_batch.batch["responses"],
+                test_output_gen_batch.batch["response_mask"],
+            )
+            output_texts = response_debug["output"]
             sample_outputs.extend(output_texts)
+            sample_raw_outputs.extend(response_debug["raw_output"])
+            sample_first_token_ids.extend(response_debug["first_response_token_id"])
+            sample_first_token_texts.extend(response_debug["first_response_token_text"])
+            sample_first_token_is_eos.extend(response_debug["first_response_token_is_eos"])
+            sample_blank_outputs.extend(response_debug["blank_output"])
 
             test_batch = test_batch.union(test_output_gen_batch)
             test_batch.meta_info["validate"] = True
@@ -1379,6 +1433,11 @@ class RayPPOTrainer:
         # dump generations
         val_data_dir = self.config.trainer.get("validation_data_dir", None)
         if val_data_dir:
+            reward_extra_infos_dict["raw_output"] = sample_raw_outputs
+            reward_extra_infos_dict["first_response_token_id"] = sample_first_token_ids
+            reward_extra_infos_dict["first_response_token_text"] = sample_first_token_texts
+            reward_extra_infos_dict["first_response_token_is_eos"] = sample_first_token_is_eos
+            reward_extra_infos_dict["blank_output"] = sample_blank_outputs
             self._dump_generations(
                 inputs=sample_inputs,
                 outputs=sample_outputs,
