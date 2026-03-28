@@ -1259,6 +1259,9 @@ class RayPPOTrainer:
             dtype=torch.float32,
             device=device,
         )
+        hybrid_source_fraction = self_distillation_mask.float().mean().item()
+        hybrid_nonblank_fraction = 1.0
+        hybrid_target_scenario_fraction = 1.0
         if loss_mode == "sdpo_grpo_hybrid":
             hybrid_mask = self_distillation_mask.bool()
             if self_distillation_cfg.get("hybrid_require_nonblank_output", True):
@@ -1267,6 +1270,7 @@ class RayPPOTrainer:
                     dtype=torch.bool,
                     device=device,
                 )
+                hybrid_nonblank_fraction = nonblank_mask.float().mean().item()
                 hybrid_mask = hybrid_mask & nonblank_mask
             target_scenarios = {
                 str(item).strip()
@@ -1282,6 +1286,7 @@ class RayPPOTrainer:
                     dtype=torch.bool,
                     device=device,
                 )
+                hybrid_target_scenario_fraction = scenario_mask.float().mean().item()
                 hybrid_mask = hybrid_mask & scenario_mask
             self_distillation_mask = hybrid_mask.to(torch.float32)
 
@@ -1308,7 +1313,14 @@ class RayPPOTrainer:
             "self_distillation/teacher_prompt_length_max": teacher_prompt_lengths.max().item(),
         }
         if loss_mode == "sdpo_grpo_hybrid":
-            metrics["hybrid/sdpo_gate_fraction"] = self_distillation_mask.float().mean().item()
+            final_gate_fraction = self_distillation_mask.float().mean().item()
+            metrics["hybrid/sdpo_source_fraction"] = hybrid_source_fraction
+            metrics["hybrid/nonblank_output_fraction"] = hybrid_nonblank_fraction
+            metrics["hybrid/target_scenario_fraction"] = hybrid_target_scenario_fraction
+            metrics["hybrid/sdpo_gate_fraction"] = final_gate_fraction
+            metrics["hybrid/gate_kept_from_source_fraction"] = (
+                final_gate_fraction / hybrid_source_fraction if hybrid_source_fraction > 0 else 0.0
+            )
         return (
             DataProto.from_dict(
                 tensors={
