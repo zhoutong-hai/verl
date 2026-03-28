@@ -32,14 +32,22 @@ __all__ = [
     "ActorConfig",
     "FSDPActorConfig",
     "McoreActorConfig",
+    "SELF_DISTILLATION_LOSS_MODES",
+    "uses_self_distillation_loss_mode",
 ]
+
+SELF_DISTILLATION_LOSS_MODES = frozenset({"sdpo", "sdpo_grpo_hybrid"})
+
+
+def uses_self_distillation_loss_mode(loss_mode: str) -> bool:
+    return loss_mode in SELF_DISTILLATION_LOSS_MODES
 
 
 @dataclass
 class SelfDistillationConfig(BaseConfig):
     """Configuration for SDPO-style self-distillation.
 
-    Distillation is enabled when ``policy_loss.loss_mode == "sdpo"``.
+    Distillation is enabled when ``policy_loss.loss_mode`` uses a self-distillation path.
     """
 
     full_logit_distillation: bool = True
@@ -84,6 +92,11 @@ class SelfDistillationConfig(BaseConfig):
     custom_teacher_prompt_function: dict[str, Any] = field(default_factory=dict)
     dump_teacher_prompt_text: bool = False
     dump_teacher_prompt_max_chars: int = 0
+    hybrid_grpo_weight: float = 0.8
+    hybrid_sdpo_weight: float = 0.2
+    hybrid_base_policy_loss_mode: str = "vanilla"
+    hybrid_require_nonblank_output: bool = True
+    hybrid_target_scenarios: list[str] = field(default_factory=list)
 
     def __post_init__(self):
         if not 0.0 <= self.alpha <= 1.0:
@@ -126,6 +139,18 @@ class SelfDistillationConfig(BaseConfig):
                 "self_distillation.dump_teacher_prompt_max_chars must be non-negative, "
                 f"got {self.dump_teacher_prompt_max_chars}"
             )
+        if self.hybrid_grpo_weight < 0.0 or self.hybrid_sdpo_weight < 0.0:
+            raise ValueError(
+                "self_distillation.hybrid_grpo_weight and hybrid_sdpo_weight must be non-negative, "
+                f"got {self.hybrid_grpo_weight} and {self.hybrid_sdpo_weight}"
+            )
+        if self.hybrid_grpo_weight == 0.0 and self.hybrid_sdpo_weight == 0.0:
+            raise ValueError("At least one hybrid loss weight must be positive.")
+        if self.hybrid_base_policy_loss_mode in SELF_DISTILLATION_LOSS_MODES:
+            raise ValueError(
+                "self_distillation.hybrid_base_policy_loss_mode must refer to a policy-gradient loss mode, "
+                f"got {self.hybrid_base_policy_loss_mode}"
+            )
 
 
 @dataclass
@@ -164,7 +189,7 @@ class PolicyLossConfig(BaseConfig):
     The inheritance from BaseConfig provides omegaconf.DictConfig-like interface for a dataclass config.
 
     Args:
-        loss_mode (str): Loss function mode. Options: 'vanilla', 'clip-cov', 'kl-cov', 'gpg', 'sdpo'.
+        loss_mode (str): Loss function mode. Options: 'vanilla', 'clip-cov', 'kl-cov', 'gpg', 'sdpo', 'sdpo_grpo_hybrid'.
         clip_cov_ratio (float): Ratio of tokens to be clipped for clip-cov loss.
         clip_cov_lb (float): Lower bound for clip-cov loss.
         clip_cov_ub (float): Upper bound for clip-cov loss.

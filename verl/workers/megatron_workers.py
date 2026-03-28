@@ -74,7 +74,13 @@ from verl.utils.profiler.performance import reduce_timing, topk_reduce_ratio_min
 from verl.utils.ray_utils import get_event_loop
 from verl.utils.torch_functional import use_original_torch_compile
 from verl.workers.actor.megatron_actor import MegatronPPOActor
-from verl.workers.config import HFModelConfig, McoreCriticConfig, RolloutConfig, SelfDistillationConfig
+from verl.workers.config import (
+    HFModelConfig,
+    McoreCriticConfig,
+    RolloutConfig,
+    SelfDistillationConfig,
+    uses_self_distillation_loss_mode,
+)
 from verl.workers.critic.megatron_critic import MegatronPPOCritic
 from verl.workers.reward_model.megatron.reward_model import MegatronRewardModel
 from verl.workers.rollout import get_rollout_class
@@ -779,7 +785,7 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
         if not self._is_ref:
             return metrics
         loss_mode = self.config.actor.policy_loss.get("loss_mode", "vanilla")
-        if loss_mode != "sdpo":
+        if not uses_self_distillation_loss_mode(loss_mode):
             return metrics
 
         sd_cfg = self.config.actor.get("self_distillation", None)

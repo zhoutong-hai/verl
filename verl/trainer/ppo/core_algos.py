@@ -18,7 +18,12 @@ The function implemented in this file should be used by trainer with different d
 implement PPO-like algorithms.
 """
 
-__all__ = ["register_adv_est", "get_adv_estimator_fn", "AdvantageEstimator"]
+__all__ = [
+    "register_adv_est",
+    "get_adv_estimator_fn",
+    "AdvantageEstimator",
+    "compute_grpo_sdpo_hybrid_loss",
+]
 
 from collections import defaultdict
 from enum import Enum
@@ -33,7 +38,7 @@ import verl.utils.torch_functional as verl_F
 from verl.trainer.config import AlgoConfig
 from verl.utils import as_torch_index, group_mean_std
 from verl.utils.import_utils import deprecated
-from verl.workers.config import ActorConfig
+from verl.workers.config import ActorConfig, uses_self_distillation_loss_mode
 
 PolicyLossFn = Callable[
     [
@@ -969,6 +974,74 @@ def compute_self_distillation_loss(
         batch_num_tokens=loss_mask.sum().clamp(min=1.0),
     )
     return loss, metrics
+
+
+def compute_grpo_sdpo_hybrid_loss(
+    *,
+    old_log_prob: torch.Tensor,
+    log_prob: torch.Tensor,
+    advantages: torch.Tensor,
+    response_mask: torch.Tensor,
+    self_distillation_config: Any,
+    config: ActorConfig,
+    loss_agg_mode: str = "token-mean",
+    rollout_is_weights: Optional[torch.Tensor] = None,
+    teacher_log_probs: torch.Tensor,
+    student_all_log_probs: Optional[torch.Tensor] = None,
+    teacher_all_log_probs: Optional[torch.Tensor] = None,
+    student_topk_log_probs: Optional[torch.Tensor] = None,
+    teacher_topk_log_probs: Optional[torch.Tensor] = None,
+    self_distillation_mask: Optional[torch.Tensor] = None,
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    base_policy_loss_mode = getattr(self_distillation_config, "hybrid_base_policy_loss_mode", "vanilla")
+    if uses_self_distillation_loss_mode(base_policy_loss_mode):
+        raise ValueError(
+            "compute_grpo_sdpo_hybrid_loss requires a policy-gradient base loss mode, "
+            f"got {base_policy_loss_mode}"
+        )
+
+    policy_loss_fn = get_policy_loss_fn(base_policy_loss_mode)
+    grpo_loss, grpo_metrics = policy_loss_fn(
+        old_log_prob=old_log_prob,
+        log_prob=log_prob,
+        advantages=advantages,
+        response_mask=response_mask,
+        loss_agg_mode=loss_agg_mode,
+        config=config,
+        rollout_is_weights=rollout_is_weights,
+    )
+
+    sdpo_loss, sdpo_metrics = compute_self_distillation_loss(
+        student_log_probs=log_prob,
+        teacher_log_probs=teacher_log_probs,
+        response_mask=response_mask,
+        self_distillation_config=self_distillation_config,
+        old_log_probs=old_log_prob,
+        student_all_log_probs=student_all_log_probs,
+        teacher_all_log_probs=teacher_all_log_probs,
+        student_topk_log_probs=student_topk_log_probs,
+        teacher_topk_log_probs=teacher_topk_log_probs,
+        self_distillation_mask=self_distillation_mask,
+        loss_agg_mode=loss_agg_mode,
+        rollout_is_weights=rollout_is_weights,
+    )
+
+    grpo_weight = float(getattr(self_distillation_config, "hybrid_grpo_weight", 0.8))
+    sdpo_weight = float(getattr(self_distillation_config, "hybrid_sdpo_weight", 0.2))
+    combined_loss = grpo_weight * grpo_loss + sdpo_weight * sdpo_loss
+
+    hybrid_metrics = dict(grpo_metrics)
+    hybrid_metrics.update(sdpo_metrics)
+    hybrid_metrics["hybrid/grpo_weight"] = grpo_weight
+    hybrid_metrics["hybrid/sdpo_weight"] = sdpo_weight
+    hybrid_metrics["hybrid/grpo_loss"] = grpo_loss.detach().item()
+    hybrid_metrics["hybrid/sdpo_loss"] = sdpo_loss.detach().item()
+    hybrid_metrics["hybrid/combined_loss"] = combined_loss.detach().item()
+    if self_distillation_mask is not None:
+        hybrid_metrics["hybrid/sdpo_active_sample_fraction"] = self_distillation_mask.float().mean().detach().item()
+    else:
+        hybrid_metrics["hybrid/sdpo_active_sample_fraction"] = 1.0
+    return combined_loss, hybrid_metrics
 
 
 @deprecated("verl.trainer.ppo.core_algos.compute_policy_loss_vanilla")

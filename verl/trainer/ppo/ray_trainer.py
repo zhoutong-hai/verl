@@ -69,7 +69,7 @@ from verl.utils.rollout_skip import RolloutSkip
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
-from verl.workers.config import FSDPEngineConfig, SelfDistillationConfig
+from verl.workers.config import FSDPEngineConfig, SelfDistillationConfig, uses_self_distillation_loss_mode
 from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
 
 
@@ -849,6 +849,12 @@ class RayPPOTrainer:
                     feedback_list[i] = raw_feedback[i]
         return feedback_list
 
+    @staticmethod
+    def _scenario_name_from_extra_info(extra_info: Any) -> str:
+        if not isinstance(extra_info, dict):
+            return ""
+        return str(extra_info.get("scenario", "") or "").strip()
+
     def _collect_solutions_by_uid(
         self,
         batch: DataProto,
@@ -1027,7 +1033,7 @@ class RayPPOTrainer:
     ) -> Optional[tuple[DataProto, dict[str, float]]]:
         raw_self_distillation_cfg = self.config.actor_rollout_ref.actor.get("self_distillation", None)
         loss_mode = self.config.actor_rollout_ref.actor.policy_loss.get("loss_mode", "vanilla")
-        if raw_self_distillation_cfg is None or loss_mode != "sdpo":
+        if raw_self_distillation_cfg is None or not uses_self_distillation_loss_mode(loss_mode):
             return None
         self_distillation_cfg = omega_conf_to_dataclass(
             raw_self_distillation_cfg,
@@ -1253,6 +1259,31 @@ class RayPPOTrainer:
             dtype=torch.float32,
             device=device,
         )
+        if loss_mode == "sdpo_grpo_hybrid":
+            hybrid_mask = self_distillation_mask.bool()
+            if self_distillation_cfg.get("hybrid_require_nonblank_output", True):
+                nonblank_mask = torch.tensor(
+                    [bool(response_texts[i].strip()) for i in range(batch_size)],
+                    dtype=torch.bool,
+                    device=device,
+                )
+                hybrid_mask = hybrid_mask & nonblank_mask
+            target_scenarios = {
+                str(item).strip()
+                for item in (self_distillation_cfg.get("hybrid_target_scenarios", []) or [])
+                if str(item).strip()
+            }
+            if target_scenarios:
+                scenario_mask = torch.tensor(
+                    [
+                        self._scenario_name_from_extra_info(extra_infos[i]) in target_scenarios
+                        for i in range(batch_size)
+                    ],
+                    dtype=torch.bool,
+                    device=device,
+                )
+                hybrid_mask = hybrid_mask & scenario_mask
+            self_distillation_mask = hybrid_mask.to(torch.float32)
 
         uids = set(batch.non_tensor_batch["uid"])
         num_with_feedback_available = sum(1 for item in feedback_list if item is not None)
@@ -1276,6 +1307,8 @@ class RayPPOTrainer:
             "self_distillation/teacher_prompt_length_mean": teacher_prompt_lengths.mean().item(),
             "self_distillation/teacher_prompt_length_max": teacher_prompt_lengths.max().item(),
         }
+        if loss_mode == "sdpo_grpo_hybrid":
+            metrics["hybrid/sdpo_gate_fraction"] = self_distillation_mask.float().mean().item()
         return (
             DataProto.from_dict(
                 tensors={

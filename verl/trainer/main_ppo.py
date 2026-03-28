@@ -30,6 +30,7 @@ from verl.trainer.ppo.utils import need_critic, need_reference_policy
 from verl.utils.config import validate_config
 from verl.utils.device import auto_set_device, is_cuda_available
 from verl.utils.import_utils import load_extern_object
+from verl.workers.config import uses_self_distillation_loss_mode
 
 
 @hydra.main(config_path="config", config_name="ppo_trainer", version_base=None)
@@ -128,7 +129,9 @@ class TaskRunner:
         use_legacy_worker_impl = config.trainer.get("use_legacy_worker_impl", "auto")
         self_distillation_cfg = config.actor_rollout_ref.actor.get("self_distillation", None)
         loss_mode = config.actor_rollout_ref.actor.policy_loss.get("loss_mode", "vanilla")
-        self_distillation_needs_ref = self_distillation_cfg is not None and loss_mode == "sdpo"
+        self_distillation_needs_ref = (
+            self_distillation_cfg is not None and uses_self_distillation_loss_mode(loss_mode)
+        )
 
         if self_distillation_needs_ref and (
             config.algorithm.use_kl_in_reward or config.actor_rollout_ref.actor.use_kl_loss

@@ -22,10 +22,13 @@ import torch
 import verl.trainer.ppo.core_algos
 from verl.trainer.ppo.core_algos import (
     compute_gae_advantage_return,
+    compute_grpo_sdpo_hybrid_loss,
     compute_grpo_outcome_advantage,
     compute_grpo_vectorized_outcome_advantage,
+    compute_policy_loss_vanilla,
     compute_rloo_outcome_advantage,
     compute_rloo_vectorized_outcome_advantage,
+    compute_self_distillation_loss,
     get_adv_estimator_fn,
     register_adv_est,
 )
@@ -217,6 +220,104 @@ def _rand_mask(batch_size: int, seq_len: int) -> torch.Tensor:
     if len(rows_without_one) > 0:
         mask[rows_without_one, -1] = 1.0
     return mask
+
+
+class _DummyActorConfig:
+    def __init__(self):
+        self.clip_ratio = 0.2
+        self.clip_ratio_low = 0.2
+        self.clip_ratio_high = 0.2
+        self.global_batch_info = {}
+
+    def get(self, key, default=None):
+        return getattr(self, key, default)
+
+
+class _DummySelfDistillationConfig:
+    def __init__(self, *, hybrid_grpo_weight=0.8, hybrid_sdpo_weight=0.2):
+        self.full_logit_distillation = False
+        self.alpha = 1.0
+        self.is_clip = None
+        self.hybrid_grpo_weight = hybrid_grpo_weight
+        self.hybrid_sdpo_weight = hybrid_sdpo_weight
+        self.hybrid_base_policy_loss_mode = "vanilla"
+
+
+def test_compute_grpo_sdpo_hybrid_loss_matches_weighted_sum():
+    config = _DummyActorConfig()
+    sdpo_cfg = _DummySelfDistillationConfig(hybrid_grpo_weight=0.8, hybrid_sdpo_weight=0.2)
+
+    old_log_prob = torch.tensor([[0.0, -0.1]], dtype=torch.float32)
+    log_prob = torch.tensor([[0.1, -0.2]], dtype=torch.float32)
+    teacher_log_prob = torch.tensor([[0.3, -0.5]], dtype=torch.float32)
+    advantages = torch.tensor([[1.0, -0.5]], dtype=torch.float32)
+    response_mask = torch.tensor([[1.0, 1.0]], dtype=torch.float32)
+    self_distillation_mask = torch.tensor([1.0], dtype=torch.float32)
+
+    grpo_loss, _ = compute_policy_loss_vanilla(
+        old_log_prob=old_log_prob,
+        log_prob=log_prob,
+        advantages=advantages,
+        response_mask=response_mask,
+        config=config,
+    )
+    sdpo_loss, _ = compute_self_distillation_loss(
+        student_log_probs=log_prob,
+        teacher_log_probs=teacher_log_prob,
+        response_mask=response_mask,
+        self_distillation_config=sdpo_cfg,
+        self_distillation_mask=self_distillation_mask,
+    )
+
+    hybrid_loss, metrics = compute_grpo_sdpo_hybrid_loss(
+        old_log_prob=old_log_prob,
+        log_prob=log_prob,
+        advantages=advantages,
+        response_mask=response_mask,
+        self_distillation_config=sdpo_cfg,
+        config=config,
+        teacher_log_probs=teacher_log_prob,
+        self_distillation_mask=self_distillation_mask,
+    )
+
+    expected = 0.8 * grpo_loss + 0.2 * sdpo_loss
+    assert torch.allclose(hybrid_loss, expected)
+    assert metrics["hybrid/grpo_weight"] == 0.8
+    assert metrics["hybrid/sdpo_weight"] == 0.2
+    assert metrics["hybrid/sdpo_active_sample_fraction"] == 1.0
+
+
+def test_compute_grpo_sdpo_hybrid_loss_respects_empty_sdpo_mask():
+    config = _DummyActorConfig()
+    sdpo_cfg = _DummySelfDistillationConfig(hybrid_grpo_weight=0.8, hybrid_sdpo_weight=0.2)
+
+    old_log_prob = torch.tensor([[0.0, -0.1]], dtype=torch.float32)
+    log_prob = torch.tensor([[0.1, -0.2]], dtype=torch.float32)
+    teacher_log_prob = torch.tensor([[0.3, -0.5]], dtype=torch.float32)
+    advantages = torch.tensor([[1.0, -0.5]], dtype=torch.float32)
+    response_mask = torch.tensor([[1.0, 1.0]], dtype=torch.float32)
+    self_distillation_mask = torch.tensor([0.0], dtype=torch.float32)
+
+    grpo_loss, _ = compute_policy_loss_vanilla(
+        old_log_prob=old_log_prob,
+        log_prob=log_prob,
+        advantages=advantages,
+        response_mask=response_mask,
+        config=config,
+    )
+    hybrid_loss, metrics = compute_grpo_sdpo_hybrid_loss(
+        old_log_prob=old_log_prob,
+        log_prob=log_prob,
+        advantages=advantages,
+        response_mask=response_mask,
+        self_distillation_config=sdpo_cfg,
+        config=config,
+        teacher_log_probs=teacher_log_prob,
+        self_distillation_mask=self_distillation_mask,
+    )
+
+    assert torch.allclose(hybrid_loss, 0.8 * grpo_loss)
+    assert metrics["hybrid/sdpo_active_sample_fraction"] == 0.0
 
 
 @pytest.mark.parametrize(

@@ -37,7 +37,13 @@ from omegaconf import OmegaConf
 from torch import nn
 
 from verl import DataProto
-from verl.trainer.ppo.core_algos import agg_loss, compute_self_distillation_loss, get_policy_loss_fn, kl_penalty
+from verl.trainer.ppo.core_algos import (
+    agg_loss,
+    compute_grpo_sdpo_hybrid_loss,
+    compute_self_distillation_loss,
+    get_policy_loss_fn,
+    kl_penalty,
+)
 from verl.utils.device import get_device_id, get_torch_device
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.megatron.pipeline_parallel import make_batch_generator
@@ -57,7 +63,7 @@ from verl.utils.py_functional import append_to_dict
 from verl.utils.seqlen_balancing import get_reverse_idx, rearrange_micro_batches
 from verl.utils.torch_functional import broadcast_dict_tensor
 from verl.workers.actor import BasePPOActor
-from verl.workers.config import SelfDistillationConfig
+from verl.workers.config import SelfDistillationConfig, uses_self_distillation_loss_mode
 
 __all__ = ["MegatronPPOActor"]
 
@@ -416,7 +422,7 @@ class MegatronPPOActor(BasePPOActor):
             "old_log_probs",
             "advantages",
         ]
-        if self.config.policy_loss.get("loss_mode", "vanilla") == "sdpo":
+        if uses_self_distillation_loss_mode(self.config.policy_loss.get("loss_mode", "vanilla")):
             select_keys.extend(["teacher_log_probs", "self_distillation_mask"])
             raw_self_distillation_cfg = getattr(self.config, "self_distillation", None)
             if raw_self_distillation_cfg is not None:
@@ -580,10 +586,12 @@ class MegatronPPOActor(BasePPOActor):
                 # Extract pre-computed rollout correction weights if present
                 # Weights are computed centrally in trainer and added when algorithm.rollout_is=True
                 rollout_is_weights = data.get("rollout_is_weights", None)
-                if loss_mode == "sdpo":
+                if uses_self_distillation_loss_mode(loss_mode):
                     raw_self_distillation_cfg = getattr(self.config, "self_distillation", None)
                     if raw_self_distillation_cfg is None:
-                        raise ValueError("loss_mode='sdpo' requires actor.self_distillation config.")
+                        raise ValueError(
+                            f"loss_mode='{loss_mode}' requires actor.self_distillation config."
+                        )
                     self_distillation_cfg = omega_conf_to_dataclass(
                         raw_self_distillation_cfg,
                         dataclass_type=SelfDistillationConfig,
@@ -654,18 +662,34 @@ class MegatronPPOActor(BasePPOActor):
                         )
                         print(f"Dumped Megatron SDPO actor tensors to {step_dir}")
                         self._debug_sdpo_dumped_steps.add(current_step)
-                    pg_loss, pg_metrics = compute_self_distillation_loss(
-                        student_log_probs=log_prob,
-                        teacher_log_probs=data["teacher_log_probs"],
-                        response_mask=response_mask,
-                        self_distillation_config=self_distillation_cfg,
-                        old_log_probs=old_log_prob,
-                        student_topk_log_probs=student_topk_log_probs,
-                        teacher_topk_log_probs=data.get("teacher_topk_log_probs"),
-                        self_distillation_mask=data.get("self_distillation_mask"),
-                        loss_agg_mode=loss_agg_mode,
-                        rollout_is_weights=rollout_is_weights,
-                    )
+                    if loss_mode == "sdpo":
+                        pg_loss, pg_metrics = compute_self_distillation_loss(
+                            student_log_probs=log_prob,
+                            teacher_log_probs=data["teacher_log_probs"],
+                            response_mask=response_mask,
+                            self_distillation_config=self_distillation_cfg,
+                            old_log_probs=old_log_prob,
+                            student_topk_log_probs=student_topk_log_probs,
+                            teacher_topk_log_probs=data.get("teacher_topk_log_probs"),
+                            self_distillation_mask=data.get("self_distillation_mask"),
+                            loss_agg_mode=loss_agg_mode,
+                            rollout_is_weights=rollout_is_weights,
+                        )
+                    else:
+                        pg_loss, pg_metrics = compute_grpo_sdpo_hybrid_loss(
+                            old_log_prob=old_log_prob,
+                            log_prob=log_prob,
+                            advantages=advantages,
+                            response_mask=response_mask,
+                            self_distillation_config=self_distillation_cfg,
+                            config=self.config,
+                            loss_agg_mode=loss_agg_mode,
+                            rollout_is_weights=rollout_is_weights,
+                            teacher_log_probs=data["teacher_log_probs"],
+                            student_topk_log_probs=student_topk_log_probs,
+                            teacher_topk_log_probs=data.get("teacher_topk_log_probs"),
+                            self_distillation_mask=data.get("self_distillation_mask"),
+                        )
                     active_sdpo_mask = response_mask.bool()
                     if "self_distillation_mask" in data:
                         active_sdpo_mask = active_sdpo_mask & data["self_distillation_mask"].unsqueeze(1).bool()
