@@ -80,6 +80,7 @@ class SelfDistillationConfig(BaseConfig):
         "{feedback_raw}\n\n"
     )
     include_failed_attempt_in_feedback_only: bool = False
+    include_failed_attempt_with_solution: bool = False
     failed_attempt_extract_code_only: bool = True
     failed_attempt_max_chars: int = 1200
     failed_attempt_template: str = (

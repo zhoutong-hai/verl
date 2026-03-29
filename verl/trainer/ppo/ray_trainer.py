@@ -1114,8 +1114,13 @@ class RayPPOTrainer:
             sanitized_failed_attempt = None
             if (
                 use_feedback
-                and not has_solution
-                and self_distillation_cfg.get("include_failed_attempt_in_feedback_only", False)
+                and (
+                    (
+                        not has_solution
+                        and self_distillation_cfg.get("include_failed_attempt_in_feedback_only", False)
+                    )
+                    or (has_solution and self_distillation_cfg.get("include_failed_attempt_with_solution", False))
+                )
             ):
                 sanitized_failed_attempt = self._prepare_failed_attempt_reference(response_texts[i], self_distillation_cfg)
 
