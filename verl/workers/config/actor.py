@@ -98,6 +98,12 @@ class SelfDistillationConfig(BaseConfig):
     hybrid_base_policy_loss_mode: str = "vanilla"
     hybrid_require_nonblank_output: bool = True
     hybrid_target_scenarios: list[str] = field(default_factory=list)
+    repair_ce_weight: float = 0.0
+    repair_context: str = "original_prompt"
+    repair_mask_mode: str = "tool_span"
+    repair_target_scenarios: list[str] = field(default_factory=list)
+    repair_require_missing_tool: bool = True
+    repair_require_solution: bool = True
 
     def __post_init__(self):
         if not 0.0 <= self.alpha <= 1.0:
@@ -151,6 +157,22 @@ class SelfDistillationConfig(BaseConfig):
             raise ValueError(
                 "self_distillation.hybrid_base_policy_loss_mode must refer to a policy-gradient loss mode, "
                 f"got {self.hybrid_base_policy_loss_mode}"
+            )
+        if self.repair_ce_weight < 0.0:
+            raise ValueError(
+                f"self_distillation.repair_ce_weight must be non-negative, got {self.repair_ce_weight}"
+            )
+        valid_repair_contexts = ["original_prompt"]
+        if self.repair_context not in valid_repair_contexts:
+            raise ValueError(
+                "self_distillation.repair_context must be one of "
+                f"{valid_repair_contexts}, got {self.repair_context}"
+            )
+        valid_repair_mask_modes = ["tool_span", "branch_point", "full"]
+        if self.repair_mask_mode not in valid_repair_mask_modes:
+            raise ValueError(
+                "self_distillation.repair_mask_mode must be one of "
+                f"{valid_repair_mask_modes}, got {self.repair_mask_mode}"
             )
 
 

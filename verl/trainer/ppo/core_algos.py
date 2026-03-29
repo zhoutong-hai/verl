@@ -23,6 +23,7 @@ __all__ = [
     "get_adv_estimator_fn",
     "AdvantageEstimator",
     "compute_grpo_sdpo_hybrid_loss",
+    "compute_repair_ce_loss",
 ]
 
 from collections import defaultdict
@@ -966,6 +967,46 @@ def compute_self_distillation_loss(
         metrics["self_distillation/student_minus_teacher_logprob_abs_mean"] = 0.0
         metrics["self_distillation/teacher_preferred_token_fraction"] = 0.0
         metrics["self_distillation/per_token_loss_mean"] = 0.0
+
+    loss = agg_loss(
+        loss_mat=per_token_loss,
+        loss_mask=loss_mask,
+        loss_agg_mode=loss_agg_mode,
+        batch_num_tokens=loss_mask.sum().clamp(min=1.0),
+    )
+    return loss, metrics
+
+
+def compute_repair_ce_loss(
+    *,
+    repair_log_probs: torch.Tensor,
+    repair_response_mask: torch.Tensor,
+    repair_loss_mask: Optional[torch.Tensor] = None,
+    loss_agg_mode: str = "token-mean",
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    loss_mask = repair_response_mask
+    if repair_loss_mask is not None:
+        loss_mask = loss_mask * repair_loss_mask
+
+    per_token_loss = -repair_log_probs
+    active_token_count = loss_mask.sum()
+    total_token_count = repair_response_mask.sum().clamp(min=1.0)
+    active_sample_mask = loss_mask.sum(dim=-1) > 0
+
+    metrics = {
+        "repair/active_token_count": active_token_count.detach().item(),
+        "repair/active_token_fraction": (active_token_count / total_token_count).detach().item(),
+        "repair/active_sample_count": active_sample_mask.sum().detach().item(),
+        "repair/active_sample_fraction": active_sample_mask.to(torch.float32).mean().detach().item(),
+    }
+
+    active_mask = loss_mask.bool()
+    if active_mask.any():
+        metrics["repair/per_token_loss_mean"] = per_token_loss[active_mask].mean().detach().item()
+        metrics["repair/target_logprob_mean"] = repair_log_probs[active_mask].mean().detach().item()
+    else:
+        metrics["repair/per_token_loss_mean"] = 0.0
+        metrics["repair/target_logprob_mean"] = 0.0
 
     loss = agg_loss(
         loss_mat=per_token_loss,

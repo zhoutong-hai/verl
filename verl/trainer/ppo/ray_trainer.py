@@ -62,6 +62,7 @@ STRICT_PYTHON_BLOCK_PATTERN = re.compile(r"^\s*```python\s*\n(?P<code>.*?)```\s*
 STRICT_FENCED_BLOCK_PATTERN = re.compile(r"^\s*```(?:py)?\s*\n(?P<code>.*?)```\s*$", re.DOTALL | re.IGNORECASE)
 SEARCH_PYTHON_BLOCK_PATTERN = re.compile(r"```python\s*\n(?P<code>.*?)```", re.DOTALL | re.IGNORECASE)
 SEARCH_FENCED_BLOCK_PATTERN = re.compile(r"```(?:py)?\s*\n(?P<code>.*?)```", re.DOTALL | re.IGNORECASE)
+TOOL_ACTION_PATTERN = re.compile(r"<function=(?P<name>[^>]+)>(?P<body>.*?)</function>", re.DOTALL)
 from verl.utils.metric import reduce_metrics
 from verl.utils.model import compute_position_id_with_mask
 from verl.utils.py_functional import rename_dict
@@ -855,6 +856,43 @@ class RayPPOTrainer:
             return ""
         return str(extra_info.get("scenario", "") or "").strip()
 
+    @staticmethod
+    def _parse_tool_name_from_text(text: Any) -> str:
+        if not isinstance(text, str):
+            return ""
+        match = TOOL_ACTION_PATTERN.search(text)
+        if match is None:
+            return ""
+        return str(match.group("name") or "").strip()
+
+    @staticmethod
+    def _response_contains_expected_tool(response_text: str, expected_tool_name: str) -> bool:
+        if not expected_tool_name:
+            return False
+        return RayPPOTrainer._parse_tool_name_from_text(response_text) == expected_tool_name
+
+    @staticmethod
+    def _common_prefix_length(lhs: list[int], rhs: list[int]) -> int:
+        prefix_len = 0
+        for lhs_token, rhs_token in zip(lhs, rhs, strict=False):
+            if lhs_token != rhs_token:
+                break
+            prefix_len += 1
+        return prefix_len
+
+    def _tool_token_span_in_text(self, text: str) -> Optional[tuple[int, int]]:
+        if not isinstance(text, str):
+            return None
+        match = TOOL_ACTION_PATTERN.search(text)
+        if match is None:
+            return None
+        start, end = match.span()
+        prefix_ids = self.tokenizer.encode(text[:start], add_special_tokens=False)
+        tool_ids = self.tokenizer.encode(text[:end], add_special_tokens=False)
+        if len(tool_ids) <= len(prefix_ids):
+            return None
+        return len(prefix_ids), len(tool_ids)
+
     def _collect_solutions_by_uid(
         self,
         batch: DataProto,
@@ -941,6 +979,184 @@ class RayPPOTrainer:
             solution_str = self._remove_thinking_trace(solution_str)
         return solution_str
 
+    def _maybe_build_repair_supervision_batch(
+        self,
+        *,
+        batch: DataProto,
+        responses: torch.Tensor,
+        response_mask: torch.Tensor,
+        response_texts: list[str],
+        solution_strs: list[Optional[str]],
+        extra_infos: Any,
+        self_distillation_cfg: SelfDistillationConfig,
+        device: torch.device,
+    ) -> Optional[tuple[DataProto, dict[str, float]]]:
+        repair_weight = float(self_distillation_cfg.get("repair_ce_weight", 0.0) or 0.0)
+        if repair_weight <= 0.0:
+            return None
+
+        repair_context = str(self_distillation_cfg.get("repair_context", "original_prompt"))
+        if repair_context != "original_prompt":
+            raise ValueError(f"Unsupported repair_context: {repair_context}")
+
+        repair_mask_mode = str(self_distillation_cfg.get("repair_mask_mode", "tool_span"))
+        repair_require_missing_tool = bool(self_distillation_cfg.get("repair_require_missing_tool", True))
+        repair_require_solution = bool(self_distillation_cfg.get("repair_require_solution", True))
+        target_scenarios = {
+            str(item).strip()
+            for item in (self_distillation_cfg.get("repair_target_scenarios", []) or [])
+            if str(item).strip()
+        }
+
+        input_ids = batch.batch["input_ids"]
+        attention_mask = batch.batch["attention_mask"]
+        attention_mask_dtype = attention_mask.dtype
+        batch_size = responses.shape[0]
+        pad_token_id = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else 0
+
+        repair_prompt_ids: list[list[int]] = []
+        repair_response_ids_list: list[list[int]] = []
+        repair_loss_masks: list[list[int]] = []
+        repair_active: list[bool] = []
+
+        scenario_kept = 0
+        missing_tool_kept = 0
+        with_solution = 0
+
+        for i in range(batch_size):
+            scenario_name = self._scenario_name_from_extra_info(extra_infos[i] if i < len(extra_infos) else None)
+            solution_text = solution_strs[i] or ""
+            if solution_text:
+                with_solution += 1
+            sample_active = True
+            if repair_require_solution and not solution_text:
+                sample_active = False
+            if sample_active and target_scenarios and scenario_name not in target_scenarios:
+                sample_active = False
+            if sample_active and target_scenarios:
+                scenario_kept += 1
+
+            extra_info = extra_infos[i] if i < len(extra_infos) and isinstance(extra_infos[i], dict) else {}
+            expected_tool_name = self._parse_tool_name_from_text(
+                extra_info.get("tool_label", "") or extra_info.get("label_tool", "") or solution_text
+            )
+            if sample_active and repair_require_missing_tool and expected_tool_name:
+                if self._response_contains_expected_tool(response_texts[i], expected_tool_name):
+                    sample_active = False
+                else:
+                    missing_tool_kept += 1
+
+            repair_response_ids = self.tokenizer.encode(solution_text, add_special_tokens=False) if solution_text else []
+            loss_start = 0
+            loss_end = len(repair_response_ids)
+            if sample_active:
+                if len(repair_response_ids) == 0:
+                    sample_active = False
+                elif repair_mask_mode == "tool_span":
+                    tool_span = self._tool_token_span_in_text(solution_text)
+                    if tool_span is None:
+                        sample_active = False
+                    else:
+                        loss_start, loss_end = tool_span
+                elif repair_mask_mode == "branch_point":
+                    bad_response_ids = responses[i][response_mask[i].bool()].tolist()
+                    loss_start = self._common_prefix_length(bad_response_ids, repair_response_ids)
+                    loss_end = len(repair_response_ids)
+                    if loss_start >= loss_end:
+                        sample_active = False
+                elif repair_mask_mode == "full":
+                    pass
+                else:
+                    raise ValueError(f"Unsupported repair_mask_mode: {repair_mask_mode}")
+
+            if sample_active:
+                active_input_ids = input_ids[i][attention_mask[i].bool()].tolist()
+                prompt_token_count = len(active_input_ids) - int(response_mask[i].sum().item())
+                prompt_ids = active_input_ids[: max(prompt_token_count, 0)]
+                if len(prompt_ids) == 0:
+                    sample_active = False
+            else:
+                prompt_ids = []
+
+            if sample_active:
+                current_loss_mask = [0] * len(repair_response_ids)
+                for token_idx in range(loss_start, loss_end):
+                    current_loss_mask[token_idx] = 1
+            else:
+                repair_response_ids = []
+                current_loss_mask = []
+
+            repair_prompt_ids.append(prompt_ids)
+            repair_response_ids_list.append(repair_response_ids)
+            repair_loss_masks.append(current_loss_mask)
+            repair_active.append(sample_active)
+
+        max_response_len = max(max((len(item) for item in repair_response_ids_list), default=0), 1)
+        max_total_len = max(
+            max((len(prompt_ids) + len(response_ids) for prompt_ids, response_ids in zip(repair_prompt_ids, repair_response_ids_list, strict=False)), default=0),
+            1,
+        )
+
+        repair_input_ids = torch.full((batch_size, max_total_len), pad_token_id, dtype=input_ids.dtype, device=device)
+        repair_attention_mask = torch.zeros(
+            (batch_size, max_total_len), dtype=attention_mask_dtype, device=device
+        )
+        repair_responses = torch.full(
+            (batch_size, max_response_len), pad_token_id, dtype=responses.dtype, device=device
+        )
+        repair_response_mask = torch.zeros(
+            (batch_size, max_response_len), dtype=response_mask.dtype, device=device
+        )
+        repair_loss_mask = torch.zeros(
+            (batch_size, max_response_len), dtype=response_mask.dtype, device=device
+        )
+
+        for i, (prompt_ids, response_ids, loss_mask_values) in enumerate(
+            zip(repair_prompt_ids, repair_response_ids_list, repair_loss_masks, strict=False)
+        ):
+            total_ids = prompt_ids + response_ids
+            if total_ids:
+                repair_input_ids[i, : len(total_ids)] = torch.tensor(total_ids, dtype=input_ids.dtype, device=device)
+                repair_attention_mask[i, : len(total_ids)] = 1
+            if response_ids:
+                repair_responses[i, : len(response_ids)] = torch.tensor(
+                    response_ids,
+                    dtype=responses.dtype,
+                    device=device,
+                )
+                repair_response_mask[i, : len(response_ids)] = 1
+                repair_loss_mask[i, : len(loss_mask_values)] = torch.tensor(
+                    loss_mask_values,
+                    dtype=response_mask.dtype,
+                    device=device,
+                )
+
+        repair_position_ids = compute_position_id_with_mask(repair_attention_mask)
+        repair_active_tensor = torch.tensor(repair_active, dtype=torch.float32, device=device)
+        metrics = {
+            "repair/source_solution_fraction": with_solution / batch_size,
+            "repair/target_scenario_fraction": scenario_kept / batch_size if target_scenarios else 1.0,
+            "repair/missing_tool_fraction": missing_tool_kept / batch_size if repair_require_missing_tool else 1.0,
+            "repair/active_sample_fraction": repair_active_tensor.mean().item(),
+            "repair/mask_token_fraction": (
+                repair_loss_mask.sum() / repair_response_mask.sum().clamp(min=1.0)
+            ).detach().item(),
+        }
+        return (
+            DataProto.from_dict(
+                tensors={
+                    "repair_input_ids": repair_input_ids,
+                    "repair_attention_mask": repair_attention_mask,
+                    "repair_position_ids": repair_position_ids,
+                    "repair_responses": repair_responses,
+                    "repair_response_mask": repair_response_mask,
+                    "repair_loss_mask": repair_loss_mask,
+                    "repair_sample_mask": repair_active_tensor,
+                }
+            ),
+            metrics,
+        )
+
     def _compute_self_distillation_student_support(self, batch: DataProto) -> DataProto:
         raw_self_distillation_cfg = self.config.actor_rollout_ref.actor.get("self_distillation", None)
         if raw_self_distillation_cfg is None:
@@ -1015,9 +1231,19 @@ class RayPPOTrainer:
         else:
             teacher_log_prob = self._compute_ref_log_prob(ref_input)
             teacher_log_prob.batch["teacher_log_probs"] = teacher_log_prob.batch.pop("ref_log_prob")
-        teacher_log_prob = teacher_log_prob.union(
-            DataProto.from_dict(tensors={"self_distillation_mask": teacher_batch.batch["self_distillation_mask"]})
-        )
+        passthrough_tensors = {"self_distillation_mask": teacher_batch.batch["self_distillation_mask"]}
+        for key in (
+            "repair_input_ids",
+            "repair_attention_mask",
+            "repair_position_ids",
+            "repair_responses",
+            "repair_response_mask",
+            "repair_loss_mask",
+            "repair_sample_mask",
+        ):
+            if key in teacher_batch.batch:
+                passthrough_tensors[key] = teacher_batch.batch[key]
+        teacher_log_prob = teacher_log_prob.union(DataProto.from_dict(tensors=passthrough_tensors))
         return teacher_log_prob
 
     def _compute_ref_distillation_targets(self, batch: DataProto) -> DataProto:
@@ -1326,20 +1552,37 @@ class RayPPOTrainer:
             metrics["hybrid/gate_kept_from_source_fraction"] = (
                 final_gate_fraction / hybrid_source_fraction if hybrid_source_fraction > 0 else 0.0
             )
+
+        teacher_batch = DataProto.from_dict(
+            tensors={
+                "responses": responses,
+                "response_mask": response_mask,
+                "teacher_input_ids": teacher_input_ids,
+                "teacher_attention_mask": teacher_attention_mask,
+                "teacher_position_ids": teacher_position_ids,
+                "self_distillation_mask": self_distillation_mask,
+            },
+            non_tensors={"teacher_prompt": teacher_prompt_texts_for_dump}
+            if teacher_prompt_texts_for_dump is not None
+            else None,
+        )
+
+        repair_batch_and_metrics = self._maybe_build_repair_supervision_batch(
+            batch=batch,
+            responses=responses,
+            response_mask=response_mask,
+            response_texts=response_texts,
+            solution_strs=solution_strs,
+            extra_infos=extra_infos,
+            self_distillation_cfg=self_distillation_cfg,
+            device=device,
+        )
+        if repair_batch_and_metrics is not None:
+            repair_batch, repair_metrics = repair_batch_and_metrics
+            teacher_batch = teacher_batch.union(repair_batch)
+            metrics.update(repair_metrics)
         return (
-            DataProto.from_dict(
-                tensors={
-                    "responses": responses,
-                    "response_mask": response_mask,
-                    "teacher_input_ids": teacher_input_ids,
-                    "teacher_attention_mask": teacher_attention_mask,
-                    "teacher_position_ids": teacher_position_ids,
-                    "self_distillation_mask": self_distillation_mask,
-                },
-                non_tensors={"teacher_prompt": teacher_prompt_texts_for_dump}
-                if teacher_prompt_texts_for_dump is not None
-                else None,
-            ),
+            teacher_batch,
             metrics,
         )
 

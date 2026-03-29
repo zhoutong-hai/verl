@@ -23,7 +23,7 @@ import itertools
 import logging
 import os
 from functools import partial
-from typing import Iterable
+from typing import Iterable, Optional
 
 import torch
 import torch.distributed
@@ -40,6 +40,7 @@ from verl import DataProto
 from verl.trainer.ppo.core_algos import (
     agg_loss,
     compute_grpo_sdpo_hybrid_loss,
+    compute_repair_ce_loss,
     compute_self_distillation_loss,
     get_policy_loss_fn,
     kl_penalty,
@@ -432,6 +433,18 @@ class MegatronPPOActor(BasePPOActor):
                 )
                 if self_distillation_cfg.full_logit_distillation:
                     select_keys.extend(["teacher_topk_log_probs", "teacher_topk_indices"])
+                if float(self_distillation_cfg.get("repair_ce_weight", 0.0) or 0.0) > 0.0:
+                    select_keys.extend(
+                        [
+                            "repair_input_ids",
+                            "repair_attention_mask",
+                            "repair_position_ids",
+                            "repair_responses",
+                            "repair_response_mask",
+                            "repair_loss_mask",
+                            "repair_sample_mask",
+                        ]
+                    )
         if self.config.use_kl_loss:
             select_keys.append("ref_log_prob")
         # Include pre-computed IS weights if present in batch
@@ -575,6 +588,18 @@ class MegatronPPOActor(BasePPOActor):
             ret_entropy = None
             stats = {}
             if not forward_only:
+                if meta_info.get("repair_ce_only", False):
+                    repair_loss, repair_metrics = compute_repair_ce_loss(
+                        repair_log_probs=log_prob,
+                        repair_response_mask=response_mask,
+                        repair_loss_mask=data.get("repair_loss_mask"),
+                        loss_agg_mode=loss_agg_mode,
+                    )
+                    repair_weight = float(meta_info.get("repair_ce_weight", 0.0) or 0.0)
+                    repair_metrics["repair/weight"] = repair_weight
+                    repair_metrics["repair/loss"] = repair_loss.detach().item()
+                    return repair_loss * repair_weight, repair_metrics
+
                 old_log_prob = data["old_log_probs"]
                 advantages = data["advantages"]
 
@@ -1505,6 +1530,37 @@ class MegatronPPOActor(BasePPOActor):
             and users have to combine the output in each dp rank manually.
 
         """
+        raw_self_distillation_cfg = getattr(self.config, "self_distillation", None)
+        repair_ce_weight = 0.0
+        if raw_self_distillation_cfg is not None:
+            self_distillation_cfg = omega_conf_to_dataclass(
+                raw_self_distillation_cfg,
+                dataclass_type=SelfDistillationConfig,
+            )
+            repair_ce_weight = float(self_distillation_cfg.get("repair_ce_weight", 0.0) or 0.0)
+
+        def build_repair_forward_batch(source_batch: DataProto) -> Optional[DataProto]:
+            if repair_ce_weight <= 0.0:
+                return None
+            repair_loss_mask = source_batch.batch.get("repair_loss_mask")
+            if repair_loss_mask is None or repair_loss_mask.sum().item() == 0:
+                return None
+            repair_batch = DataProto.from_dict(
+                tensors={
+                    "responses": source_batch.batch["repair_responses"],
+                    "response_mask": source_batch.batch["repair_response_mask"],
+                    "input_ids": source_batch.batch["repair_input_ids"],
+                    "attention_mask": source_batch.batch["repair_attention_mask"],
+                    "position_ids": source_batch.batch["repair_position_ids"],
+                    "repair_loss_mask": repair_loss_mask,
+                    "repair_sample_mask": source_batch.batch["repair_sample_mask"],
+                }
+            )
+            repair_batch.meta_info.update(source_batch.meta_info)
+            repair_batch.meta_info["repair_ce_only"] = True
+            repair_batch.meta_info["repair_ce_weight"] = repair_ce_weight
+            return repair_batch
+
         metrics = {}
         if self.use_torch_profiler and self.prof and self.prof.enable:
             self.prof.start()
@@ -1537,6 +1593,21 @@ class MegatronPPOActor(BasePPOActor):
             for metric in metric_micro_batch:
                 # Note that o[0] is metrics, o[1] is entropy, o[2] is response_mask
                 append_to_dict(metrics, metric[0])  # append the metric from this micro-batch to global metrics.
+
+            repair_forward_batch = build_repair_forward_batch(data)
+            if repair_forward_batch is not None:
+                repair_metrics = self.forward_backward_batch(
+                    repair_forward_batch,
+                    calculate_entropy=False,
+                    use_dynamic_bsz=self.config.use_dynamic_bsz,
+                    micro_batch_size=micro_batch_size,
+                    max_token_len=max_token_len,
+                    mini_batch_size=self.config.ppo_mini_batch_size,
+                )["output"]
+                for metric in repair_metrics:
+                    append_to_dict(metrics, metric[0])
+            elif repair_ce_weight > 0.0:
+                append_to_dict(metrics, {"repair/empty_target_batch": 1.0, "repair/weight": repair_ce_weight})
 
             update_successful, grad_norm, num_zeros_in_grad = self.actor_optimizer.step()
             data = {"actor/grad_norm": grad_norm}

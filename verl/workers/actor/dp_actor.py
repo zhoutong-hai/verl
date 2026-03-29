@@ -32,6 +32,7 @@ from verl import DataProto
 from verl.trainer.ppo.core_algos import (
     agg_loss,
     compute_grpo_sdpo_hybrid_loss,
+    compute_repair_ce_loss,
     compute_self_distillation_loss,
     get_policy_loss_fn,
     kl_penalty,
@@ -695,6 +696,7 @@ class DataParallelPPOActor(BasePPOActor):
 
         self_distillation_enabled = uses_self_distillation_loss_mode(loss_mode)
         self_distillation_cfg = getattr(self.config, "self_distillation", None)
+        repair_ce_enabled = False
         if self_distillation_enabled:
             if self_distillation_cfg is None:
                 raise ValueError(f"loss_mode='{loss_mode}' requires actor.self_distillation config.")
@@ -708,6 +710,19 @@ class DataParallelPPOActor(BasePPOActor):
                 "teacher_position_ids",
                 "self_distillation_mask",
             }
+            repair_ce_enabled = float(self_distillation_cfg.get("repair_ce_weight", 0.0) or 0.0) > 0.0
+            if repair_ce_enabled:
+                self_distillation_required_keys.update(
+                    {
+                        "repair_input_ids",
+                        "repair_attention_mask",
+                        "repair_position_ids",
+                        "repair_responses",
+                        "repair_response_mask",
+                        "repair_loss_mask",
+                        "repair_sample_mask",
+                    }
+                )
             assert self_distillation_required_keys.issubset(set(data.batch.keys())), f"Missing required keys: {self_distillation_required_keys - set(data.batch.keys())}"
 
         select_keys = [
@@ -753,6 +768,7 @@ class DataParallelPPOActor(BasePPOActor):
         metrics = {
             "actor/pg_loss": 0.0,
             "actor/kl_loss": 0.0,
+            "repair/loss": 0.0,
         }
         did_update = False
 
@@ -815,6 +831,24 @@ class DataParallelPPOActor(BasePPOActor):
             )
             print(f"Dumped FSDP SDPO actor tensors to {step_dir}")
             self._debug_sdpo_dumped_steps.add(current_step)
+
+        def build_repair_batch(source_batch: DataProto) -> Optional[DataProto]:
+            if not repair_ce_enabled:
+                return None
+            repair_loss_mask = source_batch.batch.get("repair_loss_mask")
+            if repair_loss_mask is None or repair_loss_mask.sum().item() == 0:
+                return None
+            return DataProto.from_dict(
+                tensors={
+                    "responses": source_batch.batch["repair_responses"],
+                    "response_mask": source_batch.batch["repair_response_mask"],
+                    "input_ids": source_batch.batch["repair_input_ids"],
+                    "attention_mask": source_batch.batch["repair_attention_mask"],
+                    "position_ids": source_batch.batch["repair_position_ids"],
+                    "repair_loss_mask": repair_loss_mask,
+                    "repair_sample_mask": source_batch.batch["repair_sample_mask"],
+                }
+            )
 
         for _ in range(self.config.ppo_epochs):
             for batch_idx, mini_batch in enumerate(mini_batches):
@@ -1014,6 +1048,45 @@ class DataParallelPPOActor(BasePPOActor):
 
                     metrics["actor/pg_loss"] += pg_loss.detach().item() * loss_scale_factor
                     append_to_dict(metrics, micro_batch_metrics)
+
+                repair_weight = float(self_distillation_cfg.get("repair_ce_weight", 0.0) or 0.0) if repair_ce_enabled else 0.0
+                repair_batch = build_repair_batch(mini_batch)
+                if repair_batch is not None and repair_weight > 0.0:
+                    if self.config.use_dynamic_bsz:
+                        max_token_len = self.config.ppo_max_token_len_per_gpu * self.ulysses_sequence_parallel_size
+                        repair_micro_batches, _ = prepare_dynamic_batch(repair_batch, max_token_len=max_token_len)
+                    else:
+                        repair_micro_batches = repair_batch.split(self.config.ppo_micro_batch_size_per_gpu)
+
+                    for repair_micro_batch in repair_micro_batches:
+                        repair_micro_batch = repair_micro_batch.to(get_device_id())
+                        repair_model_inputs = {**repair_micro_batch.batch, "pad_token_id": pad_token_id}
+                        repair_response_mask = repair_model_inputs["response_mask"]
+                        if self.config.use_dynamic_bsz:
+                            repair_loss_scale_factor = repair_response_mask.shape[0] / self.config.ppo_mini_batch_size
+                        else:
+                            repair_loss_scale_factor = 1 / self.gradient_accumulation
+                        repair_outputs = self._forward_micro_batch(
+                            repair_model_inputs,
+                            temperature=temperature,
+                            calculate_entropy=False,
+                        )
+                        repair_loss, repair_metrics = compute_repair_ce_loss(
+                            repair_log_probs=repair_outputs["log_probs"],
+                            repair_response_mask=repair_response_mask,
+                            repair_loss_mask=repair_model_inputs["repair_loss_mask"],
+                            loss_agg_mode=loss_agg_mode,
+                        )
+                        scaled_repair_loss = repair_loss * repair_weight * repair_loss_scale_factor
+                        if self.scaler is not None:
+                            self.scaler.scale(scaled_repair_loss).backward()
+                        else:
+                            scaled_repair_loss.backward()
+                        repair_metrics["repair/weight"] = repair_weight
+                        metrics["repair/loss"] += repair_loss.detach().item() * repair_loss_scale_factor
+                        append_to_dict(metrics, repair_metrics)
+                elif repair_ce_enabled:
+                    append_to_dict(metrics, {"repair/empty_target_batch": 1.0, "repair/weight": repair_weight})
 
                 grad_norm = self._optimizer_step()
                 if torch.isfinite(grad_norm).item():
