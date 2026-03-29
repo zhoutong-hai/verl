@@ -1447,6 +1447,8 @@ class MegatronPPOActor(BasePPOActor):
                     "clip_ratio": self.config.clip_ratio,
                     "entropy_coeff": self.config.entropy_coeff,
                     "clip_ratio_c": clip_ratio_c,
+                    "repair_ce_only": bool(data.meta_info.get("repair_ce_only", False)),
+                    "repair_ce_weight": float(data.meta_info.get("repair_ce_weight", 0.0) or 0.0),
                     "debug_sdpo_dump_dir": data.meta_info.get("debug_sdpo_dump_dir"),
                     "debug_sdpo_dump_step": data.meta_info.get("debug_sdpo_dump_step"),
                     "debug_sdpo_dump_once": data.meta_info.get("debug_sdpo_dump_once"),
