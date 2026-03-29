@@ -1541,6 +1541,13 @@ class MegatronPPOActor(BasePPOActor):
             )
             repair_ce_weight = float(self_distillation_cfg.get("repair_ce_weight", 0.0) or 0.0)
 
+        def extract_metric_dict(metric_entry):
+            if isinstance(metric_entry, dict):
+                return metric_entry
+            if isinstance(metric_entry, (tuple, list)):
+                return metric_entry[0]
+            raise TypeError(f"Unexpected Megatron metric entry type: {type(metric_entry)!r}")
+
         def build_repair_forward_batch(source_batch: DataProto) -> Optional[DataProto]:
             if repair_ce_weight <= 0.0:
                 return None
@@ -1593,8 +1600,7 @@ class MegatronPPOActor(BasePPOActor):
             )
             metric_micro_batch = metric_micro_batch["output"]
             for metric in metric_micro_batch:
-                # Note that o[0] is metrics, o[1] is entropy, o[2] is response_mask
-                append_to_dict(metrics, metric[0])  # append the metric from this micro-batch to global metrics.
+                append_to_dict(metrics, extract_metric_dict(metric))
 
             repair_forward_batch = build_repair_forward_batch(data)
             if repair_forward_batch is not None:
@@ -1607,7 +1613,7 @@ class MegatronPPOActor(BasePPOActor):
                     mini_batch_size=self.config.ppo_mini_batch_size,
                 )["output"]
                 for metric in repair_metrics:
-                    append_to_dict(metrics, metric[0])
+                    append_to_dict(metrics, extract_metric_dict(metric))
             elif repair_ce_weight > 0.0:
                 append_to_dict(metrics, {"repair/empty_target_batch": 1.0, "repair/weight": repair_ce_weight})
 
