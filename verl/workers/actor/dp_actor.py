@@ -31,6 +31,7 @@ import verl.utils.torch_functional as verl_F
 from verl import DataProto
 from verl.trainer.ppo.core_algos import (
     agg_loss,
+    compute_grpo_sdpo_adv_hybrid_loss,
     compute_grpo_sdpo_hybrid_loss,
     compute_repair_ce_loss,
     compute_self_distillation_loss,
@@ -966,7 +967,7 @@ class DataParallelPPOActor(BasePPOActor):
                                 loss_agg_mode=loss_agg_mode,
                                 rollout_is_weights=rollout_is_weights,
                             )
-                        else:
+                        elif loss_mode == "sdpo_grpo_hybrid":
                             pg_loss, pg_metrics = compute_grpo_sdpo_hybrid_loss(
                                 old_log_prob=old_log_prob,
                                 log_prob=log_prob,
@@ -982,6 +983,19 @@ class DataParallelPPOActor(BasePPOActor):
                                 student_topk_log_probs=student_topk_logps,
                                 teacher_topk_log_probs=teacher_topk_logps,
                                 self_distillation_mask=self_distillation_mask,
+                            )
+                        else:
+                            pg_loss, pg_metrics = compute_grpo_sdpo_adv_hybrid_loss(
+                                old_log_prob=old_log_prob,
+                                log_prob=log_prob,
+                                advantages=advantages,
+                                response_mask=response_mask,
+                                self_distillation_config=self_distillation_cfg,
+                                config=self.config,
+                                teacher_log_probs=teacher_log_prob,
+                                self_distillation_mask=self_distillation_mask,
+                                loss_agg_mode=loss_agg_mode,
+                                rollout_is_weights=rollout_is_weights,
                             )
 
                         pg_metrics["self_distillation/empty_target_batch"] = self_distillation_mask.sum().item() == 0

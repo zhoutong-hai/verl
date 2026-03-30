@@ -1493,7 +1493,7 @@ class RayPPOTrainer:
         hybrid_source_fraction = self_distillation_mask.float().mean().item()
         hybrid_nonblank_fraction = 1.0
         hybrid_target_scenario_fraction = 1.0
-        if loss_mode == "sdpo_grpo_hybrid":
+        if loss_mode in {"sdpo_grpo_hybrid", "sdpo_grpo_adv_hybrid"}:
             hybrid_mask = self_distillation_mask.bool()
             if self_distillation_cfg.get("hybrid_require_nonblank_output", True):
                 nonblank_mask = torch.tensor(
@@ -1543,7 +1543,7 @@ class RayPPOTrainer:
             "self_distillation/teacher_prompt_length_mean": teacher_prompt_lengths.mean().item(),
             "self_distillation/teacher_prompt_length_max": teacher_prompt_lengths.max().item(),
         }
-        if loss_mode == "sdpo_grpo_hybrid":
+        if loss_mode in {"sdpo_grpo_hybrid", "sdpo_grpo_adv_hybrid"}:
             final_gate_fraction = self_distillation_mask.float().mean().item()
             metrics["hybrid/sdpo_source_fraction"] = hybrid_source_fraction
             metrics["hybrid/nonblank_output_fraction"] = hybrid_nonblank_fraction

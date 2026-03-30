@@ -23,6 +23,7 @@ __all__ = [
     "get_adv_estimator_fn",
     "AdvantageEstimator",
     "compute_grpo_sdpo_hybrid_loss",
+    "compute_grpo_sdpo_adv_hybrid_loss",
     "compute_repair_ce_loss",
 ]
 
@@ -1082,6 +1083,95 @@ def compute_grpo_sdpo_hybrid_loss(
         hybrid_metrics["hybrid/sdpo_active_sample_fraction"] = self_distillation_mask.float().mean().detach().item()
     else:
         hybrid_metrics["hybrid/sdpo_active_sample_fraction"] = 1.0
+    return combined_loss, hybrid_metrics
+
+
+def compute_grpo_sdpo_adv_hybrid_loss(
+    *,
+    old_log_prob: torch.Tensor,
+    log_prob: torch.Tensor,
+    advantages: torch.Tensor,
+    response_mask: torch.Tensor,
+    self_distillation_config: Any,
+    config: ActorConfig,
+    teacher_log_probs: torch.Tensor,
+    self_distillation_mask: Optional[torch.Tensor] = None,
+    loss_agg_mode: str = "token-mean",
+    rollout_is_weights: Optional[torch.Tensor] = None,
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    base_policy_loss_mode = getattr(self_distillation_config, "hybrid_base_policy_loss_mode", "vanilla")
+    if uses_self_distillation_loss_mode(base_policy_loss_mode):
+        raise ValueError(
+            "compute_grpo_sdpo_adv_hybrid_loss requires a policy-gradient base loss mode, "
+            f"got {base_policy_loss_mode}"
+        )
+
+    loss_mask = response_mask
+    if self_distillation_mask is not None:
+        loss_mask = loss_mask * self_distillation_mask.unsqueeze(1)
+    active_mask = loss_mask.bool()
+
+    opd_advantages = (teacher_log_probs - log_prob).detach() * loss_mask
+    opd_clip = getattr(self_distillation_config, "hybrid_opd_advantage_clip", None)
+    if opd_clip is not None:
+        opd_advantages = torch.clamp(opd_advantages, min=-float(opd_clip), max=float(opd_clip))
+
+    grpo_weight = float(getattr(self_distillation_config, "hybrid_grpo_weight", 0.8))
+    opd_weight = float(getattr(self_distillation_config, "hybrid_sdpo_weight", 0.2))
+    combined_advantages = grpo_weight * advantages + opd_weight * opd_advantages
+
+    policy_loss_fn = get_policy_loss_fn(base_policy_loss_mode)
+    combined_loss, policy_metrics = policy_loss_fn(
+        old_log_prob=old_log_prob,
+        log_prob=log_prob,
+        advantages=combined_advantages,
+        response_mask=response_mask,
+        loss_agg_mode=loss_agg_mode,
+        config=config,
+        rollout_is_weights=rollout_is_weights,
+    )
+
+    hybrid_metrics = dict(policy_metrics)
+    hybrid_metrics["hybrid/grpo_weight"] = grpo_weight
+    hybrid_metrics["hybrid/opd_weight"] = opd_weight
+    hybrid_metrics["hybrid/opd_advantage_clip"] = 0.0 if opd_clip is None else float(opd_clip)
+    hybrid_metrics["hybrid/combined_loss"] = combined_loss.detach().item()
+    if self_distillation_mask is not None:
+        hybrid_metrics["hybrid/sdpo_active_sample_fraction"] = self_distillation_mask.float().mean().detach().item()
+    else:
+        hybrid_metrics["hybrid/sdpo_active_sample_fraction"] = 1.0
+
+    if active_mask.any():
+        hybrid_metrics["hybrid/opd_advantage_mean"] = opd_advantages[active_mask].mean().detach().item()
+        hybrid_metrics["hybrid/opd_advantage_abs_mean"] = opd_advantages[active_mask].abs().mean().detach().item()
+        hybrid_metrics["hybrid/opd_positive_fraction"] = (
+            (opd_advantages[active_mask] > 0).to(torch.float32).mean().detach().item()
+        )
+        hybrid_metrics["hybrid/teacher_preferred_token_fraction"] = (
+            (teacher_log_probs[active_mask] > log_prob[active_mask]).to(torch.float32).mean().detach().item()
+        )
+    else:
+        hybrid_metrics["hybrid/opd_advantage_mean"] = 0.0
+        hybrid_metrics["hybrid/opd_advantage_abs_mean"] = 0.0
+        hybrid_metrics["hybrid/opd_positive_fraction"] = 0.0
+        hybrid_metrics["hybrid/teacher_preferred_token_fraction"] = 0.0
+
+    response_active_mask = response_mask.bool()
+    if response_active_mask.any():
+        hybrid_metrics["hybrid/grpo_advantage_mean"] = advantages[response_active_mask].mean().detach().item()
+        hybrid_metrics["hybrid/grpo_advantage_abs_mean"] = advantages[response_active_mask].abs().mean().detach().item()
+        hybrid_metrics["hybrid/combined_advantage_mean"] = (
+            combined_advantages[response_active_mask].mean().detach().item()
+        )
+        hybrid_metrics["hybrid/combined_advantage_abs_mean"] = (
+            combined_advantages[response_active_mask].abs().mean().detach().item()
+        )
+    else:
+        hybrid_metrics["hybrid/grpo_advantage_mean"] = 0.0
+        hybrid_metrics["hybrid/grpo_advantage_abs_mean"] = 0.0
+        hybrid_metrics["hybrid/combined_advantage_mean"] = 0.0
+        hybrid_metrics["hybrid/combined_advantage_abs_mean"] = 0.0
+
     return combined_loss, hybrid_metrics
 
 

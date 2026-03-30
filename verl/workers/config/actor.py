@@ -36,7 +36,7 @@ __all__ = [
     "uses_self_distillation_loss_mode",
 ]
 
-SELF_DISTILLATION_LOSS_MODES = frozenset({"sdpo", "sdpo_grpo_hybrid"})
+SELF_DISTILLATION_LOSS_MODES = frozenset({"sdpo", "sdpo_grpo_hybrid", "sdpo_grpo_adv_hybrid"})
 
 
 def uses_self_distillation_loss_mode(loss_mode: str) -> bool:
@@ -95,6 +95,7 @@ class SelfDistillationConfig(BaseConfig):
     dump_teacher_prompt_max_chars: int = 0
     hybrid_grpo_weight: float = 0.8
     hybrid_sdpo_weight: float = 0.2
+    hybrid_opd_advantage_clip: Optional[float] = None
     hybrid_base_policy_loss_mode: str = "vanilla"
     hybrid_require_nonblank_output: bool = True
     hybrid_target_scenarios: list[str] = field(default_factory=list)
@@ -153,6 +154,11 @@ class SelfDistillationConfig(BaseConfig):
             )
         if self.hybrid_grpo_weight == 0.0 and self.hybrid_sdpo_weight == 0.0:
             raise ValueError("At least one hybrid loss weight must be positive.")
+        if self.hybrid_opd_advantage_clip is not None and self.hybrid_opd_advantage_clip <= 0.0:
+            raise ValueError(
+                "self_distillation.hybrid_opd_advantage_clip must be positive when set, "
+                f"got {self.hybrid_opd_advantage_clip}"
+            )
         if self.hybrid_base_policy_loss_mode in SELF_DISTILLATION_LOSS_MODES:
             raise ValueError(
                 "self_distillation.hybrid_base_policy_loss_mode must refer to a policy-gradient loss mode, "
@@ -212,7 +218,7 @@ class PolicyLossConfig(BaseConfig):
     The inheritance from BaseConfig provides omegaconf.DictConfig-like interface for a dataclass config.
 
     Args:
-        loss_mode (str): Loss function mode. Options: 'vanilla', 'clip-cov', 'kl-cov', 'gpg', 'sdpo', 'sdpo_grpo_hybrid'.
+        loss_mode (str): Loss function mode. Options: 'vanilla', 'clip-cov', 'kl-cov', 'gpg', 'sdpo', 'sdpo_grpo_hybrid', 'sdpo_grpo_adv_hybrid'.
         clip_cov_ratio (float): Ratio of tokens to be clipped for clip-cov loss.
         clip_cov_lb (float): Lower bound for clip-cov loss.
         clip_cov_ub (float): Upper bound for clip-cov loss.
