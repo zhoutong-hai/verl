@@ -851,6 +851,54 @@ class RayPPOTrainer:
         return feedback_list
 
     @staticmethod
+    def _collect_reward_info_strings(
+        include_environment_feedback: bool,
+        reward_extra_infos_dict: Optional[dict[str, Any]],
+        batch_size: int,
+        key: str,
+    ) -> list[Optional[str]]:
+        values: list[Optional[str]] = [None] * batch_size
+        if not include_environment_feedback or reward_extra_infos_dict is None:
+            return values
+        raw_values = reward_extra_infos_dict.get(key, [])
+        for i in range(min(len(raw_values), batch_size)):
+            item = raw_values[i]
+            if item is None:
+                continue
+            if not isinstance(item, str):
+                item = str(item)
+            item = item.strip()
+            if item and item not in {"[]", "null", "None"}:
+                values[i] = item
+        return values
+
+    @staticmethod
+    def _collect_reward_info_flags(
+        include_environment_feedback: bool,
+        reward_extra_infos_dict: Optional[dict[str, Any]],
+        batch_size: int,
+        key: str,
+        default: float = 1.0,
+    ) -> list[float]:
+        values: list[float] = [float(default)] * batch_size
+        if not include_environment_feedback or reward_extra_infos_dict is None:
+            return values
+        raw_values = reward_extra_infos_dict.get(key, [])
+        for i in range(min(len(raw_values), batch_size)):
+            item = raw_values[i]
+            if item is None:
+                continue
+            try:
+                values[i] = 1.0 if float(item) > 0.0 else 0.0
+            except (TypeError, ValueError):
+                normalized = str(item).strip().lower()
+                if normalized in {"true", "yes"}:
+                    values[i] = 1.0
+                elif normalized in {"false", "no"}:
+                    values[i] = 0.0
+        return values
+
+    @staticmethod
     def _scenario_name_from_extra_info(extra_info: Any) -> str:
         if not isinstance(extra_info, dict):
             return ""
@@ -1300,6 +1348,25 @@ class RayPPOTrainer:
             reward_extra_infos_dict=reward_extra_infos_dict,
             batch_size=batch_size,
         )
+        failed_verifier_trace_list = self._collect_reward_info_strings(
+            include_environment_feedback=self_distillation_cfg.include_environment_feedback,
+            reward_extra_infos_dict=reward_extra_infos_dict,
+            batch_size=batch_size,
+            key="failed_verifier_trace_json",
+        )
+        verifier_trace_list = self._collect_reward_info_strings(
+            include_environment_feedback=self_distillation_cfg.include_environment_feedback,
+            reward_extra_infos_dict=reward_extra_infos_dict,
+            batch_size=batch_size,
+            key="verifier_trace_json",
+        )
+        self_distillation_eligible_list = self._collect_reward_info_flags(
+            include_environment_feedback=self_distillation_cfg.include_environment_feedback,
+            reward_extra_infos_dict=reward_extra_infos_dict,
+            batch_size=batch_size,
+            key="self_distillation_eligible",
+            default=1.0,
+        )
 
         success_by_uid = self._collect_solutions_by_uid(
             batch,
@@ -1323,8 +1390,14 @@ class RayPPOTrainer:
         apply_kwargs = dict(**(self.config.data.get("apply_chat_template_kwargs", {}) or {}))
 
         def _build_teacher_sections(i: int) -> tuple[str, str, str, bool, Optional[str]]:
+            if self_distillation_eligible_list[i] <= 0.0:
+                return "", "", "", False, None
             has_solution = solution_strs[i] is not None
-            has_feedback = feedback_list[i] is not None
+            has_feedback = (
+                feedback_list[i] is not None
+                or failed_verifier_trace_list[i] is not None
+                or verifier_trace_list[i] is not None
+            )
             feedback_only_without_solution = self_distillation_cfg.get(
                 "environment_feedback_only_without_solution", False
             )
@@ -1376,6 +1449,9 @@ class RayPPOTrainer:
                     solution_section=solution_section,
                     feedback_section=feedback_section,
                     failed_attempt_section=failed_attempt_section,
+                    feedback_raw=feedback_list[i],
+                    failed_verifier_trace_json=failed_verifier_trace_list[i],
+                    verifier_trace_json=verifier_trace_list[i],
                     use_guidance=use_guidance,
                     self_distillation_cfg=self_distillation_cfg,
                     tokenizer=self.tokenizer,
@@ -1476,7 +1552,9 @@ class RayPPOTrainer:
 
         feedback_only_without_solution = self_distillation_cfg.get("environment_feedback_only_without_solution", False)
         feedback_used = [
-            feedback_list[i] is not None and (not feedback_only_without_solution or solution_strs[i] is None)
+            self_distillation_eligible_list[i] > 0.0
+            and feedback_list[i] is not None
+            and (not feedback_only_without_solution or solution_strs[i] is None)
             for i in range(batch_size)
         ]
         solution_and_feedback_used = [
@@ -1486,7 +1564,11 @@ class RayPPOTrainer:
             solution_strs[i] is None and feedback_used[i] for i in range(batch_size)
         ]
         self_distillation_mask = torch.tensor(
-            [solution_strs[i] is not None or feedback_used[i] for i in range(batch_size)],
+            [
+                (self_distillation_eligible_list[i] > 0.0)
+                and (solution_strs[i] is not None or feedback_used[i])
+                for i in range(batch_size)
+            ],
             dtype=torch.float32,
             device=device,
         )
@@ -1528,6 +1610,7 @@ class RayPPOTrainer:
         num_with_solution_and_feedback = sum(1 for item in solution_and_feedback_used if item)
         num_with_feedback_only = sum(1 for item in feedback_only_used if item)
         num_with_failed_attempt = sum(1 for item in failed_attempt_used if item)
+        num_self_distillation_eligible = sum(1 for item in self_distillation_eligible_list if item > 0.0)
         teacher_prompt_lengths = teacher_prompt["attention_mask"].sum(dim=1).to(torch.float32)
         metrics = {
             "self_distillation/success_group_fraction": len([uid for uid in uids if len(success_by_uid[uid]) > 0])
@@ -1535,6 +1618,7 @@ class RayPPOTrainer:
             "self_distillation/success_sample_fraction": num_with_solution / batch_size,
             "self_distillation/feedback_available_fraction": num_with_feedback_available / batch_size,
             "self_distillation/feedback_used_fraction": num_with_feedback_used / batch_size,
+            "self_distillation/eligibility_fraction": num_self_distillation_eligible / batch_size,
             "self_distillation/reprompt_sample_fraction": self_distillation_mask.float().mean().item(),
             "self_distillation/solution_used_fraction": num_with_solution / batch_size,
             "self_distillation/solution_and_feedback_fraction": num_with_solution_and_feedback / batch_size,
