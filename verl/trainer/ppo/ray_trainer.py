@@ -74,6 +74,25 @@ from verl.workers.config import FSDPEngineConfig, SelfDistillationConfig, uses_s
 from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
 
 
+def _compute_self_distillation_source_flags(
+    *,
+    self_distillation_eligible_list: list[float],
+    solution_strs: list[Optional[str]],
+    feedback_used: list[bool],
+    failure_only_source_gate: bool = False,
+) -> list[bool]:
+    """Compute sample-level SDPO/OPD source activation before extra hybrid gates."""
+    if failure_only_source_gate:
+        return [
+            (self_distillation_eligible_list[i] > 0.0) and feedback_used[i]
+            for i in range(len(self_distillation_eligible_list))
+        ]
+    return [
+        (self_distillation_eligible_list[i] > 0.0) and (solution_strs[i] is not None or feedback_used[i])
+        for i in range(len(self_distillation_eligible_list))
+    ]
+
+
 @dataclass
 class ResourcePoolManager:
     """
@@ -1563,12 +1582,14 @@ class RayPPOTrainer:
         feedback_only_used = [
             solution_strs[i] is None and feedback_used[i] for i in range(batch_size)
         ]
+        source_flags = _compute_self_distillation_source_flags(
+            self_distillation_eligible_list=self_distillation_eligible_list,
+            solution_strs=solution_strs,
+            feedback_used=feedback_used,
+            failure_only_source_gate=bool(self_distillation_cfg.get("failure_only_source_gate", False)),
+        )
         self_distillation_mask = torch.tensor(
-            [
-                (self_distillation_eligible_list[i] > 0.0)
-                and (solution_strs[i] is not None or feedback_used[i])
-                for i in range(batch_size)
-            ],
+            source_flags,
             dtype=torch.float32,
             device=device,
         )
@@ -1624,6 +1645,9 @@ class RayPPOTrainer:
             "self_distillation/solution_and_feedback_fraction": num_with_solution_and_feedback / batch_size,
             "self_distillation/feedback_only_fraction": num_with_feedback_only / batch_size,
             "self_distillation/failed_attempt_used_fraction": num_with_failed_attempt / batch_size,
+            "self_distillation/failure_only_source_gate_enabled": float(
+                bool(self_distillation_cfg.get("failure_only_source_gate", False))
+            ),
             "self_distillation/teacher_prompt_length_mean": teacher_prompt_lengths.mean().item(),
             "self_distillation/teacher_prompt_length_max": teacher_prompt_lengths.max().item(),
         }

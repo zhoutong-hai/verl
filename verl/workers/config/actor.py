@@ -90,6 +90,7 @@ class SelfDistillationConfig(BaseConfig):
     )
     include_environment_feedback: bool = False
     environment_feedback_only_without_solution: bool = False
+    failure_only_source_gate: bool = False
     custom_teacher_prompt_function: dict[str, Any] = field(default_factory=dict)
     dump_teacher_prompt_text: bool = False
     dump_teacher_prompt_max_chars: int = 0
