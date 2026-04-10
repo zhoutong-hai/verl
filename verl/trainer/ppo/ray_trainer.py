@@ -1627,6 +1627,7 @@ class RayPPOTrainer:
         uids = set(batch.non_tensor_batch["uid"])
         num_with_feedback_available = sum(1 for item in feedback_list if item is not None)
         num_with_feedback_used = sum(1 for item in feedback_used if item)
+        num_success_samples = sum(len(indices) for indices in success_by_uid.values())
         num_with_solution = sum(1 for item in solution_strs if item is not None)
         num_with_solution_and_feedback = sum(1 for item in solution_and_feedback_used if item)
         num_with_feedback_only = sum(1 for item in feedback_only_used if item)
@@ -1636,13 +1637,13 @@ class RayPPOTrainer:
         metrics = {
             "self_distillation/success_group_fraction": len([uid for uid in uids if len(success_by_uid[uid]) > 0])
             / len(uids),
-            "self_distillation/success_sample_fraction": num_with_solution / batch_size,
+            "self_distillation/success_sample_fraction": num_success_samples / batch_size,
             "self_distillation/feedback_available_fraction": num_with_feedback_available / batch_size,
             "self_distillation/feedback_used_fraction": num_with_feedback_used / batch_size,
             "self_distillation/eligibility_fraction": num_self_distillation_eligible / batch_size,
             "self_distillation/reprompt_sample_fraction": self_distillation_mask.float().mean().item(),
-            "self_distillation/solution_used_fraction": num_with_solution / batch_size,
-            "self_distillation/solution_and_feedback_fraction": num_with_solution_and_feedback / batch_size,
+            "self_distillation/successful_sibling_available_fraction": num_with_solution / batch_size,
+            "self_distillation/successful_sibling_and_feedback_fraction": num_with_solution_and_feedback / batch_size,
             "self_distillation/feedback_only_fraction": num_with_feedback_only / batch_size,
             "self_distillation/failed_attempt_used_fraction": num_with_failed_attempt / batch_size,
             "self_distillation/failure_only_source_gate_enabled": float(
