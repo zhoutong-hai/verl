@@ -24,6 +24,7 @@ __all__ = [
     "AdvantageEstimator",
     "compute_grpo_sdpo_hybrid_loss",
     "compute_grpo_sdpo_adv_hybrid_loss",
+    "compute_srpo_loss",
     "compute_repair_ce_loss",
 ]
 
@@ -835,6 +836,47 @@ def agg_loss(
     return loss
 
 
+def _prepare_self_distillation_log_probs(
+    *,
+    self_distillation_config: Any,
+    student_all_log_probs: Optional[torch.Tensor] = None,
+    teacher_all_log_probs: Optional[torch.Tensor] = None,
+    student_topk_log_probs: Optional[torch.Tensor] = None,
+    teacher_topk_log_probs: Optional[torch.Tensor] = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if not self_distillation_config.full_logit_distillation:
+        raise ValueError("_prepare_self_distillation_log_probs requires full_logit_distillation=True.")
+
+    use_topk = self_distillation_config.distillation_topk is not None
+    if use_topk:
+        if student_topk_log_probs is None or teacher_topk_log_probs is None:
+            raise ValueError("top-k distillation requires student_topk_log_probs and teacher_topk_log_probs.")
+
+        def add_tail(log_probs: torch.Tensor) -> torch.Tensor:
+            log_s = torch.logsumexp(log_probs, dim=-1, keepdim=True)
+            log_s = torch.clamp(log_s, max=-1e-7)
+            tail_log = torch.log(-torch.expm1(log_s))
+            return torch.cat([log_probs, tail_log], dim=-1)
+
+        def renorm_topk_log_probs(logp: torch.Tensor) -> torch.Tensor:
+            log_z = torch.logsumexp(logp, dim=-1, keepdim=True)
+            return logp - log_z
+
+        student_distill_log_probs = student_topk_log_probs
+        teacher_distill_log_probs = teacher_topk_log_probs
+        if self_distillation_config.distillation_add_tail:
+            student_distill_log_probs = add_tail(student_distill_log_probs)
+            teacher_distill_log_probs = add_tail(teacher_distill_log_probs)
+        else:
+            student_distill_log_probs = renorm_topk_log_probs(student_distill_log_probs)
+            teacher_distill_log_probs = renorm_topk_log_probs(teacher_distill_log_probs)
+        return student_distill_log_probs, teacher_distill_log_probs
+
+    if student_all_log_probs is None or teacher_all_log_probs is None:
+        raise ValueError("full_logit_distillation requires student_all_log_probs and teacher_all_log_probs.")
+    return student_all_log_probs, teacher_all_log_probs
+
+
 def compute_self_distillation_loss(
     student_log_probs: torch.Tensor,
     teacher_log_probs: torch.Tensor,
@@ -848,6 +890,7 @@ def compute_self_distillation_loss(
     self_distillation_mask: Optional[torch.Tensor] = None,
     loss_agg_mode: str = "token-mean",
     rollout_is_weights: Optional[torch.Tensor] = None,
+    token_weights: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     metrics = {}
 
@@ -856,34 +899,13 @@ def compute_self_distillation_loss(
         loss_mask = loss_mask * self_distillation_mask.unsqueeze(1)
 
     if self_distillation_config.full_logit_distillation:
-        use_topk = self_distillation_config.distillation_topk is not None
-        if use_topk:
-            if student_topk_log_probs is None or teacher_topk_log_probs is None:
-                raise ValueError("top-k distillation requires student_topk_log_probs and teacher_topk_log_probs.")
-
-            def add_tail(log_probs: torch.Tensor) -> torch.Tensor:
-                log_s = torch.logsumexp(log_probs, dim=-1, keepdim=True)
-                log_s = torch.clamp(log_s, max=-1e-7)
-                tail_log = torch.log(-torch.expm1(log_s))
-                return torch.cat([log_probs, tail_log], dim=-1)
-
-            def renorm_topk_log_probs(logp: torch.Tensor) -> torch.Tensor:
-                log_z = torch.logsumexp(logp, dim=-1, keepdim=True)
-                return logp - log_z
-
-            student_distill_log_probs = student_topk_log_probs
-            teacher_distill_log_probs = teacher_topk_log_probs
-            if self_distillation_config.distillation_add_tail:
-                student_distill_log_probs = add_tail(student_distill_log_probs)
-                teacher_distill_log_probs = add_tail(teacher_distill_log_probs)
-            else:
-                student_distill_log_probs = renorm_topk_log_probs(student_distill_log_probs)
-                teacher_distill_log_probs = renorm_topk_log_probs(teacher_distill_log_probs)
-        else:
-            if student_all_log_probs is None or teacher_all_log_probs is None:
-                raise ValueError("full_logit_distillation requires student_all_log_probs and teacher_all_log_probs.")
-            student_distill_log_probs = student_all_log_probs
-            teacher_distill_log_probs = teacher_all_log_probs
+        student_distill_log_probs, teacher_distill_log_probs = _prepare_self_distillation_log_probs(
+            self_distillation_config=self_distillation_config,
+            student_all_log_probs=student_all_log_probs,
+            teacher_all_log_probs=teacher_all_log_probs,
+            student_topk_log_probs=student_topk_log_probs,
+            teacher_topk_log_probs=teacher_topk_log_probs,
+        )
 
         if self_distillation_config.alpha == 0.0:
             kl_loss = F.kl_div(
@@ -930,6 +952,9 @@ def compute_self_distillation_loss(
 
     if rollout_is_weights is not None:
         per_token_loss = per_token_loss * rollout_is_weights
+
+    if token_weights is not None:
+        per_token_loss = per_token_loss * token_weights
 
     active_token_count = loss_mask.sum()
     total_token_count = response_mask.sum().clamp(min=1.0)
@@ -1018,6 +1043,82 @@ def compute_repair_ce_loss(
     return loss, metrics
 
 
+def _compute_srpo_entropy_weights(
+    *,
+    self_distillation_config: Any,
+    response_mask: torch.Tensor,
+    self_distillation_mask: Optional[torch.Tensor],
+    teacher_all_log_probs: Optional[torch.Tensor] = None,
+    student_all_log_probs: Optional[torch.Tensor] = None,
+    teacher_topk_log_probs: Optional[torch.Tensor] = None,
+    student_topk_log_probs: Optional[torch.Tensor] = None,
+) -> tuple[Optional[torch.Tensor], dict[str, float]]:
+    beta = float(getattr(self_distillation_config, "srpo_entropy_weight_beta", 0.0))
+    if beta <= 0.0:
+        return None, {
+            "srpo/teacher_entropy_mean": 0.0,
+            "srpo/entropy_weight_mean": 0.0,
+            "srpo/entropy_weight_min": 0.0,
+            "srpo/entropy_weight_max": 0.0,
+        }
+
+    if not self_distillation_config.full_logit_distillation:
+        raise ValueError("SRPO entropy weighting requires full_logit_distillation=True.")
+
+    _, teacher_distill_log_probs = _prepare_self_distillation_log_probs(
+        self_distillation_config=self_distillation_config,
+        student_all_log_probs=student_all_log_probs,
+        teacher_all_log_probs=teacher_all_log_probs,
+        student_topk_log_probs=student_topk_log_probs,
+        teacher_topk_log_probs=teacher_topk_log_probs,
+    )
+    teacher_probs = teacher_distill_log_probs.exp()
+    teacher_entropy = -(teacher_probs * teacher_distill_log_probs).sum(dim=-1)
+
+    loss_mask = response_mask
+    if self_distillation_mask is not None:
+        loss_mask = loss_mask * self_distillation_mask.unsqueeze(1)
+    active_mask = loss_mask.bool()
+
+    metrics = {
+        "srpo/teacher_entropy_mean": 0.0,
+        "srpo/entropy_weight_mean": 0.0,
+        "srpo/entropy_weight_min": 0.0,
+        "srpo/entropy_weight_max": 0.0,
+    }
+    if not active_mask.any():
+        return None, metrics
+
+    raw_weights = torch.exp(-beta * teacher_entropy)
+    normalized_weights = torch.ones_like(raw_weights)
+    active_mean = raw_weights[active_mask].mean().clamp(min=1e-8)
+    normalized_weights[active_mask] = raw_weights[active_mask] / active_mean
+
+    metrics["srpo/teacher_entropy_mean"] = teacher_entropy[active_mask].mean().detach().item()
+    metrics["srpo/entropy_weight_mean"] = normalized_weights[active_mask].mean().detach().item()
+    metrics["srpo/entropy_weight_min"] = normalized_weights[active_mask].min().detach().item()
+    metrics["srpo/entropy_weight_max"] = normalized_weights[active_mask].max().detach().item()
+    return normalized_weights, metrics
+
+
+def _compute_routed_loss_rescale(
+    *,
+    loss_agg_mode: str,
+    response_mask: torch.Tensor,
+    route_mask: torch.Tensor,
+) -> float:
+    route_mask = route_mask.to(dtype=response_mask.dtype)
+    routed_loss_mask = response_mask * route_mask.unsqueeze(1)
+    if loss_agg_mode == "token-mean":
+        total_tokens = response_mask.sum().clamp(min=1.0)
+        return float((routed_loss_mask.sum() / total_tokens).detach().item())
+    if loss_agg_mode in {"seq-mean-token-sum", "seq-mean-token-mean"}:
+        return float(route_mask.mean().detach().item())
+    if loss_agg_mode == "seq-mean-token-sum-norm":
+        return 1.0
+    raise ValueError(f"Unsupported loss_agg_mode for SRPO routed rescale: {loss_agg_mode}")
+
+
 def compute_grpo_sdpo_hybrid_loss(
     *,
     old_log_prob: torch.Tensor,
@@ -1084,6 +1185,102 @@ def compute_grpo_sdpo_hybrid_loss(
     else:
         hybrid_metrics["hybrid/sdpo_active_sample_fraction"] = 1.0
     return combined_loss, hybrid_metrics
+
+
+def compute_srpo_loss(
+    *,
+    old_log_prob: torch.Tensor,
+    log_prob: torch.Tensor,
+    advantages: torch.Tensor,
+    response_mask: torch.Tensor,
+    self_distillation_config: Any,
+    config: ActorConfig,
+    teacher_log_probs: torch.Tensor,
+    self_distillation_mask: Optional[torch.Tensor] = None,
+    loss_agg_mode: str = "token-mean",
+    rollout_is_weights: Optional[torch.Tensor] = None,
+    student_all_log_probs: Optional[torch.Tensor] = None,
+    teacher_all_log_probs: Optional[torch.Tensor] = None,
+    student_topk_log_probs: Optional[torch.Tensor] = None,
+    teacher_topk_log_probs: Optional[torch.Tensor] = None,
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    base_policy_loss_mode = getattr(self_distillation_config, "hybrid_base_policy_loss_mode", "vanilla")
+    if uses_self_distillation_loss_mode(base_policy_loss_mode):
+        raise ValueError(
+            "compute_srpo_loss requires a policy-gradient base loss mode, "
+            f"got {base_policy_loss_mode}"
+        )
+
+    if self_distillation_mask is None:
+        sdpo_route_mask = torch.ones(
+            (response_mask.shape[0],), device=response_mask.device, dtype=response_mask.dtype
+        )
+    else:
+        sdpo_route_mask = self_distillation_mask.to(dtype=response_mask.dtype)
+    grpo_route_mask = (1.0 - sdpo_route_mask).clamp(min=0.0, max=1.0)
+    routed_grpo_advantages = advantages * grpo_route_mask.unsqueeze(1)
+
+    policy_loss_fn = get_policy_loss_fn(base_policy_loss_mode)
+    grpo_loss, grpo_metrics = policy_loss_fn(
+        old_log_prob=old_log_prob,
+        log_prob=log_prob,
+        advantages=routed_grpo_advantages,
+        response_mask=response_mask,
+        loss_agg_mode=loss_agg_mode,
+        config=config,
+        rollout_is_weights=rollout_is_weights,
+    )
+
+    token_weights, entropy_metrics = _compute_srpo_entropy_weights(
+        self_distillation_config=self_distillation_config,
+        response_mask=response_mask,
+        self_distillation_mask=sdpo_route_mask,
+        teacher_all_log_probs=teacher_all_log_probs,
+        student_all_log_probs=student_all_log_probs,
+        teacher_topk_log_probs=teacher_topk_log_probs,
+        student_topk_log_probs=student_topk_log_probs,
+    )
+    sdpo_loss, sdpo_metrics = compute_self_distillation_loss(
+        student_log_probs=log_prob,
+        teacher_log_probs=teacher_log_probs,
+        response_mask=response_mask,
+        self_distillation_config=self_distillation_config,
+        old_log_probs=old_log_prob,
+        student_all_log_probs=student_all_log_probs,
+        teacher_all_log_probs=teacher_all_log_probs,
+        student_topk_log_probs=student_topk_log_probs,
+        teacher_topk_log_probs=teacher_topk_log_probs,
+        self_distillation_mask=sdpo_route_mask,
+        loss_agg_mode=loss_agg_mode,
+        rollout_is_weights=rollout_is_weights,
+        token_weights=token_weights,
+    )
+
+    sdpo_branch_rescale = _compute_routed_loss_rescale(
+        loss_agg_mode=loss_agg_mode,
+        response_mask=response_mask,
+        route_mask=sdpo_route_mask,
+    )
+    sdpo_loss_rescaled = sdpo_loss * sdpo_branch_rescale
+    combined_loss = grpo_loss + sdpo_loss_rescaled
+
+    srpo_metrics = dict(grpo_metrics)
+    srpo_metrics.update(sdpo_metrics)
+    srpo_metrics.update(entropy_metrics)
+    srpo_metrics["srpo/grpo_route_fraction"] = grpo_route_mask.mean().detach().item()
+    srpo_metrics["srpo/sdpo_route_fraction"] = sdpo_route_mask.mean().detach().item()
+    srpo_metrics["srpo/grpo_route_token_fraction"] = (
+        (response_mask * grpo_route_mask.unsqueeze(1)).sum() / response_mask.sum().clamp(min=1.0)
+    ).detach().item()
+    srpo_metrics["srpo/sdpo_route_token_fraction"] = (
+        (response_mask * sdpo_route_mask.unsqueeze(1)).sum() / response_mask.sum().clamp(min=1.0)
+    ).detach().item()
+    srpo_metrics["srpo/grpo_loss"] = grpo_loss.detach().item()
+    srpo_metrics["srpo/sdpo_loss"] = sdpo_loss.detach().item()
+    srpo_metrics["srpo/sdpo_branch_rescale"] = sdpo_branch_rescale
+    srpo_metrics["srpo/sdpo_loss_rescaled"] = sdpo_loss_rescaled.detach().item()
+    srpo_metrics["srpo/combined_loss"] = combined_loss.detach().item()
+    return combined_loss, srpo_metrics
 
 
 def compute_grpo_sdpo_adv_hybrid_loss(

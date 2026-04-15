@@ -918,6 +918,29 @@ class RayPPOTrainer:
         return values
 
     @staticmethod
+    def _collect_reward_info_scalars(
+        reward_extra_infos_dict: Optional[dict[str, Any]],
+        batch_size: int,
+        key: str,
+        default: float = 0.0,
+    ) -> tuple[list[float], list[bool]]:
+        values: list[float] = [float(default)] * batch_size
+        available: list[bool] = [False] * batch_size
+        if reward_extra_infos_dict is None:
+            return values, available
+        raw_values = reward_extra_infos_dict.get(key, [])
+        for i in range(min(len(raw_values), batch_size)):
+            item = raw_values[i]
+            if item is None:
+                continue
+            try:
+                values[i] = float(item)
+                available[i] = True
+            except (TypeError, ValueError):
+                continue
+        return values, available
+
+    @staticmethod
     def _scenario_name_from_extra_info(extra_info: Any) -> str:
         if not isinstance(extra_info, dict):
             return ""
@@ -1596,6 +1619,11 @@ class RayPPOTrainer:
         hybrid_source_fraction = self_distillation_mask.float().mean().item()
         hybrid_nonblank_fraction = 1.0
         hybrid_target_scenario_fraction = 1.0
+        srpo_nonblank_fraction = 1.0
+        srpo_target_scenario_fraction = 1.0
+        srpo_correct_fraction = 0.0
+        srpo_teacher_available_fraction = hybrid_source_fraction
+        srpo_failed_without_teacher_fraction = 0.0
         if loss_mode in {"sdpo_grpo_hybrid", "sdpo_grpo_adv_hybrid"}:
             hybrid_mask = self_distillation_mask.bool()
             if self_distillation_cfg.get("hybrid_require_nonblank_output", True):
@@ -1623,6 +1651,68 @@ class RayPPOTrainer:
                 hybrid_target_scenario_fraction = scenario_mask.float().mean().item()
                 hybrid_mask = hybrid_mask & scenario_mask
             self_distillation_mask = hybrid_mask.to(torch.float32)
+        elif loss_mode == "srpo":
+            srpo_teacher_available_mask = self_distillation_mask.bool()
+            correctness_key = str(self_distillation_cfg.get("srpo_correctness_key", "scenario_score"))
+            correctness_scores, correctness_available = self._collect_reward_info_scalars(
+                reward_extra_infos_dict=reward_extra_infos_dict,
+                batch_size=batch_size,
+                key=correctness_key,
+                default=0.0,
+            )
+            correctness_available_mask = torch.tensor(
+                correctness_available,
+                dtype=torch.bool,
+                device=device,
+            )
+            if not correctness_available_mask.any():
+                raise ValueError(
+                    "SRPO requires a numeric correctness signal in reward_extra_infos_dict; "
+                    f"configured key '{correctness_key}' was missing or non-numeric for the whole batch."
+                )
+            correctness_threshold = float(self_distillation_cfg.get("srpo_correctness_threshold", 1.0))
+            correctness_require_nonblank = bool(self_distillation_cfg.get("srpo_correctness_require_nonblank", True))
+            nonblank_mask = torch.tensor(
+                [bool(response_texts[i].strip()) for i in range(batch_size)],
+                dtype=torch.bool,
+                device=device,
+            )
+            srpo_nonblank_fraction = nonblank_mask.float().mean().item()
+            correct_mask = torch.tensor(
+                [
+                    (correctness_scores[i] >= correctness_threshold)
+                    and (nonblank_mask[i].item() if correctness_require_nonblank else True)
+                    for i in range(batch_size)
+                ],
+                dtype=torch.bool,
+                device=device,
+            )
+            correct_mask = correct_mask & correctness_available_mask
+            srpo_mask = srpo_teacher_available_mask & correctness_available_mask & ~correct_mask
+            if self_distillation_cfg.get("srpo_require_nonblank_output", True):
+                srpo_mask = srpo_mask & nonblank_mask
+            target_scenarios = {
+                str(item).strip()
+                for item in (self_distillation_cfg.get("srpo_target_scenarios", []) or [])
+                if str(item).strip()
+            }
+            if target_scenarios:
+                scenario_mask = torch.tensor(
+                    [
+                        self._scenario_name_from_extra_info(extra_infos[i]) in target_scenarios
+                        for i in range(batch_size)
+                    ],
+                    dtype=torch.bool,
+                    device=device,
+                )
+                srpo_target_scenario_fraction = scenario_mask.float().mean().item()
+                srpo_mask = srpo_mask & scenario_mask
+            self_distillation_mask = srpo_mask.to(torch.float32)
+            srpo_correct_fraction = correct_mask.float().mean().item()
+            srpo_teacher_available_fraction = srpo_teacher_available_mask.float().mean().item()
+            srpo_failed_without_teacher_fraction = (
+                correctness_available_mask & (~correct_mask) & (~srpo_teacher_available_mask)
+            ).float().mean().item()
 
         uids = set(batch.non_tensor_batch["uid"])
         num_with_feedback_available = sum(1 for item in feedback_list if item is not None)
@@ -1660,6 +1750,20 @@ class RayPPOTrainer:
             metrics["hybrid/sdpo_gate_fraction"] = final_gate_fraction
             metrics["hybrid/gate_kept_from_source_fraction"] = (
                 final_gate_fraction / hybrid_source_fraction if hybrid_source_fraction > 0 else 0.0
+            )
+        elif loss_mode == "srpo":
+            srpo_route_fraction = self_distillation_mask.float().mean().item()
+            metrics["srpo/correct_fraction"] = srpo_correct_fraction
+            metrics["srpo/correctness_available_fraction"] = correctness_available_mask.float().mean().item()
+            metrics["srpo/correctness_missing_fraction"] = (~correctness_available_mask).float().mean().item()
+            metrics["srpo/teacher_available_fraction"] = srpo_teacher_available_fraction
+            metrics["srpo/nonblank_output_fraction"] = srpo_nonblank_fraction
+            metrics["srpo/target_scenario_fraction"] = srpo_target_scenario_fraction
+            metrics["srpo/sdpo_route_fraction"] = srpo_route_fraction
+            metrics["srpo/grpo_route_fraction"] = 1.0 - srpo_route_fraction
+            metrics["srpo/failed_without_teacher_fraction"] = srpo_failed_without_teacher_fraction
+            metrics["srpo/route_kept_from_teacher_available_fraction"] = (
+                srpo_route_fraction / srpo_teacher_available_fraction if srpo_teacher_available_fraction > 0 else 0.0
             )
 
         teacher_batch = DataProto.from_dict(

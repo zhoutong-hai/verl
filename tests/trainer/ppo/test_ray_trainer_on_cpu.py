@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from verl.trainer.ppo.ray_trainer import _compute_self_distillation_source_flags
+from verl.trainer.ppo.ray_trainer import RayPPOTrainer, _compute_self_distillation_source_flags
 
 
 def test_compute_self_distillation_source_flags_default_uses_solution_or_feedback():
@@ -35,3 +35,15 @@ def test_compute_self_distillation_source_flags_failure_only_requires_feedback()
     )
 
     assert flags == [False, True, False, False]
+
+
+def test_collect_reward_info_scalars_tracks_missing_and_nonnumeric_values():
+    values, available = RayPPOTrainer._collect_reward_info_scalars(
+        reward_extra_infos_dict={"scenario_score": [1.0, "0.5", None, "bad"]},
+        batch_size=5,
+        key="scenario_score",
+        default=0.0,
+    )
+
+    assert values == [1.0, 0.5, 0.0, 0.0, 0.0]
+    assert available == [True, True, False, False, False]

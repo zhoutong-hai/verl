@@ -36,7 +36,7 @@ __all__ = [
     "uses_self_distillation_loss_mode",
 ]
 
-SELF_DISTILLATION_LOSS_MODES = frozenset({"sdpo", "sdpo_grpo_hybrid", "sdpo_grpo_adv_hybrid"})
+SELF_DISTILLATION_LOSS_MODES = frozenset({"sdpo", "sdpo_grpo_hybrid", "sdpo_grpo_adv_hybrid", "srpo"})
 
 
 def uses_self_distillation_loss_mode(loss_mode: str) -> bool:
@@ -100,6 +100,12 @@ class SelfDistillationConfig(BaseConfig):
     hybrid_base_policy_loss_mode: str = "vanilla"
     hybrid_require_nonblank_output: bool = True
     hybrid_target_scenarios: list[str] = field(default_factory=list)
+    srpo_correctness_key: str = "scenario_score"
+    srpo_correctness_threshold: float = 1.0
+    srpo_correctness_require_nonblank: bool = True
+    srpo_require_nonblank_output: bool = True
+    srpo_target_scenarios: list[str] = field(default_factory=list)
+    srpo_entropy_weight_beta: float = 1.0
     repair_ce_weight: float = 0.0
     repair_context: str = "original_prompt"
     repair_mask_mode: str = "tool_span"
@@ -165,6 +171,16 @@ class SelfDistillationConfig(BaseConfig):
                 "self_distillation.hybrid_base_policy_loss_mode must refer to a policy-gradient loss mode, "
                 f"got {self.hybrid_base_policy_loss_mode}"
             )
+        if self.srpo_correctness_threshold < 0.0:
+            raise ValueError(
+                "self_distillation.srpo_correctness_threshold must be non-negative, "
+                f"got {self.srpo_correctness_threshold}"
+            )
+        if self.srpo_entropy_weight_beta < 0.0:
+            raise ValueError(
+                "self_distillation.srpo_entropy_weight_beta must be non-negative, "
+                f"got {self.srpo_entropy_weight_beta}"
+            )
         if self.repair_ce_weight < 0.0:
             raise ValueError(
                 f"self_distillation.repair_ce_weight must be non-negative, got {self.repair_ce_weight}"
@@ -219,7 +235,7 @@ class PolicyLossConfig(BaseConfig):
     The inheritance from BaseConfig provides omegaconf.DictConfig-like interface for a dataclass config.
 
     Args:
-        loss_mode (str): Loss function mode. Options: 'vanilla', 'clip-cov', 'kl-cov', 'gpg', 'sdpo', 'sdpo_grpo_hybrid', 'sdpo_grpo_adv_hybrid'.
+        loss_mode (str): Loss function mode. Options: 'vanilla', 'clip-cov', 'kl-cov', 'gpg', 'sdpo', 'sdpo_grpo_hybrid', 'sdpo_grpo_adv_hybrid', 'srpo'.
         clip_cov_ratio (float): Ratio of tokens to be clipped for clip-cov loss.
         clip_cov_lb (float): Lower bound for clip-cov loss.
         clip_cov_ub (float): Upper bound for clip-cov loss.

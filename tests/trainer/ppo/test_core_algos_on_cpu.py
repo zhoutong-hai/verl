@@ -28,6 +28,7 @@ from verl.trainer.ppo.core_algos import (
     compute_policy_loss_vanilla,
     compute_rloo_outcome_advantage,
     compute_rloo_vectorized_outcome_advantage,
+    compute_srpo_loss,
     compute_self_distillation_loss,
     get_adv_estimator_fn,
     register_adv_est,
@@ -241,6 +242,7 @@ class _DummySelfDistillationConfig:
         self.hybrid_grpo_weight = hybrid_grpo_weight
         self.hybrid_sdpo_weight = hybrid_sdpo_weight
         self.hybrid_base_policy_loss_mode = "vanilla"
+        self.srpo_entropy_weight_beta = 0.0
 
 
 def test_compute_grpo_sdpo_hybrid_loss_matches_weighted_sum():
@@ -318,6 +320,62 @@ def test_compute_grpo_sdpo_hybrid_loss_respects_empty_sdpo_mask():
 
     assert torch.allclose(hybrid_loss, 0.8 * grpo_loss)
     assert metrics["hybrid/sdpo_active_sample_fraction"] == 0.0
+
+
+@pytest.mark.parametrize(
+    "loss_agg_mode,expected_rescale",
+    [
+        ("token-mean", 0.5),
+        ("seq-mean-token-mean", 0.5),
+        ("seq-mean-token-sum", 0.5),
+        ("seq-mean-token-sum-norm", 1.0),
+    ],
+)
+def test_compute_srpo_loss_routes_grpo_and_sdpo_branches(loss_agg_mode: str, expected_rescale: float):
+    config = _DummyActorConfig()
+    sdpo_cfg = _DummySelfDistillationConfig()
+
+    old_log_prob = torch.tensor([[0.0, -0.1], [0.05, -0.2]], dtype=torch.float32)
+    log_prob = torch.tensor([[0.1, -0.2], [0.0, -0.25]], dtype=torch.float32)
+    teacher_log_prob = torch.tensor([[0.3, -0.5], [0.2, -0.35]], dtype=torch.float32)
+    advantages = torch.tensor([[1.0, -0.5], [0.2, 0.4]], dtype=torch.float32)
+    response_mask = torch.tensor([[1.0, 1.0], [1.0, 1.0]], dtype=torch.float32)
+    self_distillation_mask = torch.tensor([1.0, 0.0], dtype=torch.float32)
+
+    routed_grpo_loss, _ = compute_policy_loss_vanilla(
+        old_log_prob=old_log_prob,
+        log_prob=log_prob,
+        advantages=advantages * (1.0 - self_distillation_mask).unsqueeze(1),
+        response_mask=response_mask,
+        config=config,
+        loss_agg_mode=loss_agg_mode,
+    )
+    routed_sdpo_loss, _ = compute_self_distillation_loss(
+        student_log_probs=log_prob,
+        teacher_log_probs=teacher_log_prob,
+        response_mask=response_mask,
+        self_distillation_config=sdpo_cfg,
+        self_distillation_mask=self_distillation_mask,
+        loss_agg_mode=loss_agg_mode,
+    )
+
+    srpo_loss, metrics = compute_srpo_loss(
+        old_log_prob=old_log_prob,
+        log_prob=log_prob,
+        advantages=advantages,
+        response_mask=response_mask,
+        self_distillation_config=sdpo_cfg,
+        config=config,
+        teacher_log_probs=teacher_log_prob,
+        self_distillation_mask=self_distillation_mask,
+        loss_agg_mode=loss_agg_mode,
+    )
+
+    expected = routed_grpo_loss + routed_sdpo_loss * expected_rescale
+    assert torch.allclose(srpo_loss, expected)
+    assert metrics["srpo/sdpo_route_fraction"] == 0.5
+    assert metrics["srpo/grpo_route_fraction"] == 0.5
+    assert metrics["srpo/sdpo_branch_rescale"] == expected_rescale
 
 
 @pytest.mark.parametrize(
