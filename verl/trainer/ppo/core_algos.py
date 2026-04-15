@@ -1211,12 +1211,13 @@ def compute_srpo_loss(
             f"got {base_policy_loss_mode}"
         )
 
+    route_mask_dtype = log_prob.dtype if log_prob.is_floating_point() else torch.float32
     if self_distillation_mask is None:
         sdpo_route_mask = torch.ones(
-            (response_mask.shape[0],), device=response_mask.device, dtype=response_mask.dtype
+            (response_mask.shape[0],), device=response_mask.device, dtype=route_mask_dtype
         )
     else:
-        sdpo_route_mask = self_distillation_mask.to(dtype=response_mask.dtype)
+        sdpo_route_mask = self_distillation_mask.to(device=response_mask.device, dtype=route_mask_dtype)
     grpo_route_mask = (1.0 - sdpo_route_mask).clamp(min=0.0, max=1.0)
     routed_grpo_advantages = advantages * grpo_route_mask.unsqueeze(1)
 

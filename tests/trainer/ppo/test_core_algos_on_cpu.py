@@ -378,6 +378,34 @@ def test_compute_srpo_loss_routes_grpo_and_sdpo_branches(loss_agg_mode: str, exp
     assert metrics["srpo/sdpo_branch_rescale"] == expected_rescale
 
 
+def test_compute_srpo_loss_accepts_bool_masks():
+    config = _DummyActorConfig()
+    sdpo_cfg = _DummySelfDistillationConfig()
+
+    old_log_prob = torch.tensor([[0.0, -0.1], [0.05, -0.2]], dtype=torch.float32)
+    log_prob = torch.tensor([[0.1, -0.2], [0.0, -0.25]], dtype=torch.float32)
+    teacher_log_prob = torch.tensor([[0.3, -0.5], [0.2, -0.35]], dtype=torch.float32)
+    advantages = torch.tensor([[1.0, -0.5], [0.2, 0.4]], dtype=torch.float32)
+    response_mask = torch.tensor([[True, True], [True, True]])
+    self_distillation_mask = torch.tensor([True, False])
+
+    srpo_loss, metrics = compute_srpo_loss(
+        old_log_prob=old_log_prob,
+        log_prob=log_prob,
+        advantages=advantages,
+        response_mask=response_mask,
+        self_distillation_config=sdpo_cfg,
+        config=config,
+        teacher_log_probs=teacher_log_prob,
+        self_distillation_mask=self_distillation_mask,
+        loss_agg_mode="token-mean",
+    )
+
+    assert torch.isfinite(srpo_loss)
+    assert metrics["srpo/sdpo_route_fraction"] == 0.5
+    assert metrics["srpo/grpo_route_fraction"] == 0.5
+
+
 @pytest.mark.parametrize(
     "batch_size,seq_len,num_groups,seed",
     [
