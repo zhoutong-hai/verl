@@ -24,6 +24,7 @@ from omegaconf import OmegaConf
 
 from verl.experimental.dataset.sampler import AbstractSampler
 from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
+from verl.trainer.ppo.core_algos import AdvantageEstimator
 from verl.trainer.ppo.ray_trainer import RayPPOTrainer
 from verl.trainer.ppo.reward import load_reward_manager
 from verl.trainer.ppo.utils import need_critic, need_reference_policy
@@ -132,6 +133,18 @@ class TaskRunner:
         self_distillation_needs_ref = (
             self_distillation_cfg is not None and uses_self_distillation_loss_mode(loss_mode)
         )
+        if loss_mode == "rlsd":
+            adv_estimator = config.algorithm.adv_estimator
+            if adv_estimator not in {
+                AdvantageEstimator.GRPO,
+                AdvantageEstimator.GRPO_VECTORIZED,
+                AdvantageEstimator.GRPO.value,
+                AdvantageEstimator.GRPO_VECTORIZED.value,
+            }:
+                raise ValueError(
+                    "RLSD currently requires an outcome-style GRPO advantage estimator "
+                    f"with sequence-constant advantages, got algorithm.adv_estimator={adv_estimator}."
+                )
 
         if self_distillation_needs_ref and (
             config.algorithm.use_kl_in_reward or config.actor_rollout_ref.actor.use_kl_loss

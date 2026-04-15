@@ -25,6 +25,7 @@ __all__ = [
     "compute_grpo_sdpo_hybrid_loss",
     "compute_grpo_sdpo_adv_hybrid_loss",
     "compute_srpo_loss",
+    "compute_rlsd_loss",
     "compute_repair_ce_loss",
 ]
 
@@ -1117,6 +1118,161 @@ def _compute_routed_loss_rescale(
     if loss_agg_mode == "seq-mean-token-sum-norm":
         return 1.0
     raise ValueError(f"Unsupported loss_agg_mode for SRPO routed rescale: {loss_agg_mode}")
+
+
+def _compute_linear_schedule_value(
+    *,
+    initial_value: float,
+    final_value: float,
+    decay_steps: int,
+    current_step: int,
+) -> float:
+    if decay_steps <= 0 or current_step < 0:
+        return float(initial_value)
+    progress = min(max(float(current_step), 0.0), float(decay_steps)) / float(decay_steps)
+    return float(initial_value + (final_value - initial_value) * progress)
+
+
+def _compute_sequence_advantage_signs(
+    *,
+    advantages: torch.Tensor,
+    response_mask: torch.Tensor,
+) -> torch.Tensor:
+    token_count = response_mask.sum(dim=-1).clamp(min=1.0)
+    sequence_advantages = (advantages * response_mask).sum(dim=-1) / token_count
+    return torch.sign(sequence_advantages.detach())
+
+
+def _validate_rlsd_sequence_constant_advantages(
+    *,
+    advantages: torch.Tensor,
+    response_mask: torch.Tensor,
+    atol: float = 1e-6,
+) -> None:
+    active_mask = response_mask.bool()
+    if not active_mask.any():
+        return
+    first_active_indices = active_mask.to(torch.int64).argmax(dim=-1, keepdim=True)
+    reference_advantages = advantages.gather(dim=1, index=first_active_indices)
+    deviation = torch.where(active_mask, (advantages - reference_advantages).abs(), torch.zeros_like(advantages))
+    if torch.any(deviation > atol):
+        raise ValueError(
+            "RLSD currently requires sequence-constant outcome-style advantages per response. "
+            "Token-varying advantages are not supported because they change the paper's rollout-level sign semantics."
+        )
+
+
+def compute_rlsd_loss(
+    *,
+    old_log_prob: torch.Tensor,
+    log_prob: torch.Tensor,
+    advantages: torch.Tensor,
+    response_mask: torch.Tensor,
+    self_distillation_config: Any,
+    config: ActorConfig,
+    teacher_log_probs: torch.Tensor,
+    self_distillation_mask: Optional[torch.Tensor] = None,
+    loss_agg_mode: str = "token-mean",
+    rollout_is_weights: Optional[torch.Tensor] = None,
+    current_global_step: int = -1,
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    base_policy_loss_mode = getattr(self_distillation_config, "hybrid_base_policy_loss_mode", "vanilla")
+    if uses_self_distillation_loss_mode(base_policy_loss_mode):
+        raise ValueError(
+            "compute_rlsd_loss requires a policy-gradient base loss mode, "
+            f"got {base_policy_loss_mode}"
+        )
+
+    _validate_rlsd_sequence_constant_advantages(
+        advantages=advantages,
+        response_mask=response_mask,
+    )
+    sequence_signs = _compute_sequence_advantage_signs(
+        advantages=advantages,
+        response_mask=response_mask,
+    )
+    teacher_gap = (teacher_log_probs - log_prob).detach()
+    raw_reweights = torch.exp(sequence_signs.unsqueeze(1) * teacher_gap)
+    weight_clip = float(getattr(self_distillation_config, "rlsd_weight_clip", 0.2))
+    clipped_reweights = torch.clamp(raw_reweights, min=1.0 - weight_clip, max=1.0 + weight_clip)
+    lambda_value = _compute_linear_schedule_value(
+        initial_value=float(getattr(self_distillation_config, "rlsd_lambda_init", 0.5)),
+        final_value=float(getattr(self_distillation_config, "rlsd_lambda_final", 0.0)),
+        decay_steps=int(getattr(self_distillation_config, "rlsd_lambda_decay_steps", 50)),
+        current_step=current_global_step,
+    )
+
+    multiplier = torch.ones_like(clipped_reweights)
+    if self_distillation_mask is None:
+        active_sample_mask = torch.ones(
+            (response_mask.shape[0],), device=response_mask.device, dtype=torch.bool
+        )
+    else:
+        active_sample_mask = self_distillation_mask.to(device=response_mask.device).bool()
+    active_token_mask = response_mask.bool() & active_sample_mask.unsqueeze(1)
+    if active_token_mask.any():
+        multiplier[active_token_mask] = (
+            (1.0 - lambda_value) + lambda_value * clipped_reweights[active_token_mask]
+        )
+
+    adjusted_advantages = advantages * multiplier
+
+    policy_loss_fn = get_policy_loss_fn(base_policy_loss_mode)
+    rlsd_loss, policy_metrics = policy_loss_fn(
+        old_log_prob=old_log_prob,
+        log_prob=log_prob,
+        advantages=adjusted_advantages,
+        response_mask=response_mask,
+        loss_agg_mode=loss_agg_mode,
+        config=config,
+        rollout_is_weights=rollout_is_weights,
+    )
+
+    rlsd_metrics = dict(policy_metrics)
+    total_token_count = response_mask.sum().clamp(min=1.0)
+    active_token_count = active_token_mask.sum()
+    rlsd_metrics["rlsd/lambda"] = lambda_value
+    rlsd_metrics["rlsd/weight_clip"] = weight_clip
+    rlsd_metrics["rlsd/active_sample_fraction"] = active_sample_mask.to(torch.float32).mean().detach().item()
+    rlsd_metrics["rlsd/active_token_fraction"] = (active_token_count / total_token_count).detach().item()
+    rlsd_metrics["rlsd/combined_loss"] = rlsd_loss.detach().item()
+
+    if active_token_mask.any():
+        active_teacher_gap = teacher_gap[active_token_mask]
+        active_reweights = clipped_reweights[active_token_mask]
+        active_multipliers = multiplier[active_token_mask]
+        active_base_advantages = advantages[active_token_mask]
+        active_adjusted_advantages = adjusted_advantages[active_token_mask]
+        rlsd_metrics["rlsd/teacher_gap_mean"] = active_teacher_gap.mean().detach().item()
+        rlsd_metrics["rlsd/teacher_gap_abs_mean"] = active_teacher_gap.abs().mean().detach().item()
+        rlsd_metrics["rlsd/teacher_preferred_token_fraction"] = (
+            (teacher_log_probs[active_token_mask] > log_prob[active_token_mask])
+            .to(torch.float32)
+            .mean()
+            .detach()
+            .item()
+        )
+        rlsd_metrics["rlsd/reweight_mean"] = active_reweights.mean().detach().item()
+        rlsd_metrics["rlsd/reweight_min"] = active_reweights.min().detach().item()
+        rlsd_metrics["rlsd/reweight_max"] = active_reweights.max().detach().item()
+        rlsd_metrics["rlsd/multiplier_mean"] = active_multipliers.mean().detach().item()
+        rlsd_metrics["rlsd/multiplier_min"] = active_multipliers.min().detach().item()
+        rlsd_metrics["rlsd/multiplier_max"] = active_multipliers.max().detach().item()
+        rlsd_metrics["rlsd/base_advantage_abs_mean"] = active_base_advantages.abs().mean().detach().item()
+        rlsd_metrics["rlsd/adjusted_advantage_abs_mean"] = active_adjusted_advantages.abs().mean().detach().item()
+    else:
+        rlsd_metrics["rlsd/teacher_gap_mean"] = 0.0
+        rlsd_metrics["rlsd/teacher_gap_abs_mean"] = 0.0
+        rlsd_metrics["rlsd/teacher_preferred_token_fraction"] = 0.0
+        rlsd_metrics["rlsd/reweight_mean"] = 0.0
+        rlsd_metrics["rlsd/reweight_min"] = 0.0
+        rlsd_metrics["rlsd/reweight_max"] = 0.0
+        rlsd_metrics["rlsd/multiplier_mean"] = 0.0
+        rlsd_metrics["rlsd/multiplier_min"] = 0.0
+        rlsd_metrics["rlsd/multiplier_max"] = 0.0
+        rlsd_metrics["rlsd/base_advantage_abs_mean"] = 0.0
+        rlsd_metrics["rlsd/adjusted_advantage_abs_mean"] = 0.0
+    return rlsd_loss, rlsd_metrics
 
 
 def compute_grpo_sdpo_hybrid_loss(

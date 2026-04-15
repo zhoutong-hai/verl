@@ -42,6 +42,7 @@ from verl.trainer.ppo.core_algos import (
     compute_grpo_sdpo_adv_hybrid_loss,
     compute_grpo_sdpo_hybrid_loss,
     compute_repair_ce_loss,
+    compute_rlsd_loss,
     compute_srpo_loss,
     compute_self_distillation_loss,
     get_policy_loss_fn,
@@ -731,6 +732,20 @@ class MegatronPPOActor(BasePPOActor):
                             rollout_is_weights=rollout_is_weights,
                             student_topk_log_probs=student_topk_log_probs,
                             teacher_topk_log_probs=data.get("teacher_topk_log_probs"),
+                        )
+                    elif loss_mode == "rlsd":
+                        pg_loss, pg_metrics = compute_rlsd_loss(
+                            old_log_prob=old_log_prob,
+                            log_prob=log_prob,
+                            advantages=advantages,
+                            response_mask=response_mask,
+                            self_distillation_config=self_distillation_cfg,
+                            config=self.config,
+                            teacher_log_probs=data["teacher_log_probs"],
+                            self_distillation_mask=data.get("self_distillation_mask"),
+                            loss_agg_mode=loss_agg_mode,
+                            rollout_is_weights=rollout_is_weights,
+                            current_global_step=int(meta_info.get("self_distillation_global_step", -1)),
                         )
                     else:
                         pg_loss, pg_metrics = compute_grpo_sdpo_adv_hybrid_loss(

@@ -1751,6 +1751,13 @@ class RayPPOTrainer:
             metrics["hybrid/gate_kept_from_source_fraction"] = (
                 final_gate_fraction / hybrid_source_fraction if hybrid_source_fraction > 0 else 0.0
             )
+        elif loss_mode == "rlsd":
+            rlsd_source_fraction = self_distillation_mask.float().mean().item()
+            metrics["rlsd/source_fraction"] = hybrid_source_fraction
+            metrics["rlsd/active_source_fraction"] = rlsd_source_fraction
+            metrics["rlsd/source_kept_fraction"] = (
+                rlsd_source_fraction / hybrid_source_fraction if hybrid_source_fraction > 0 else 0.0
+            )
         elif loss_mode == "srpo":
             srpo_route_fraction = self_distillation_mask.float().mean().item()
             metrics["srpo/correct_fraction"] = srpo_correct_fraction
@@ -2829,6 +2836,7 @@ class RayPPOTrainer:
                                 teacher_batch=teacher_batch_for_debug,
                                 teacher_targets=teacher_targets_for_debug,
                             )
+                        batch.meta_info["self_distillation_global_step"] = self.global_steps
                         # update actor
                         with marked_timer("update_actor", timing_raw, color="red"):
                             actor_output = self._update_actor(batch)

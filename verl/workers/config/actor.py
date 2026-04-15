@@ -36,7 +36,7 @@ __all__ = [
     "uses_self_distillation_loss_mode",
 ]
 
-SELF_DISTILLATION_LOSS_MODES = frozenset({"sdpo", "sdpo_grpo_hybrid", "sdpo_grpo_adv_hybrid", "srpo"})
+SELF_DISTILLATION_LOSS_MODES = frozenset({"sdpo", "sdpo_grpo_hybrid", "sdpo_grpo_adv_hybrid", "srpo", "rlsd"})
 
 
 def uses_self_distillation_loss_mode(loss_mode: str) -> bool:
@@ -106,6 +106,10 @@ class SelfDistillationConfig(BaseConfig):
     srpo_require_nonblank_output: bool = True
     srpo_target_scenarios: list[str] = field(default_factory=list)
     srpo_entropy_weight_beta: float = 1.0
+    rlsd_lambda_init: float = 0.5
+    rlsd_lambda_final: float = 0.0
+    rlsd_lambda_decay_steps: int = 50
+    rlsd_weight_clip: float = 0.2
     repair_ce_weight: float = 0.0
     repair_context: str = "original_prompt"
     repair_mask_mode: str = "tool_span"
@@ -181,6 +185,26 @@ class SelfDistillationConfig(BaseConfig):
                 "self_distillation.srpo_entropy_weight_beta must be non-negative, "
                 f"got {self.srpo_entropy_weight_beta}"
             )
+        if not 0.0 <= self.rlsd_lambda_init <= 1.0:
+            raise ValueError(
+                "self_distillation.rlsd_lambda_init must be in [0,1], "
+                f"got {self.rlsd_lambda_init}"
+            )
+        if not 0.0 <= self.rlsd_lambda_final <= 1.0:
+            raise ValueError(
+                "self_distillation.rlsd_lambda_final must be in [0,1], "
+                f"got {self.rlsd_lambda_final}"
+            )
+        if self.rlsd_lambda_decay_steps < 0:
+            raise ValueError(
+                "self_distillation.rlsd_lambda_decay_steps must be non-negative, "
+                f"got {self.rlsd_lambda_decay_steps}"
+            )
+        if not 0.0 <= self.rlsd_weight_clip <= 1.0:
+            raise ValueError(
+                "self_distillation.rlsd_weight_clip must be in [0,1], "
+                f"got {self.rlsd_weight_clip}"
+            )
         if self.repair_ce_weight < 0.0:
             raise ValueError(
                 f"self_distillation.repair_ce_weight must be non-negative, got {self.repair_ce_weight}"
@@ -235,7 +259,7 @@ class PolicyLossConfig(BaseConfig):
     The inheritance from BaseConfig provides omegaconf.DictConfig-like interface for a dataclass config.
 
     Args:
-        loss_mode (str): Loss function mode. Options: 'vanilla', 'clip-cov', 'kl-cov', 'gpg', 'sdpo', 'sdpo_grpo_hybrid', 'sdpo_grpo_adv_hybrid', 'srpo'.
+        loss_mode (str): Loss function mode. Options: 'vanilla', 'clip-cov', 'kl-cov', 'gpg', 'sdpo', 'sdpo_grpo_hybrid', 'sdpo_grpo_adv_hybrid', 'srpo', 'rlsd'.
         clip_cov_ratio (float): Ratio of tokens to be clipped for clip-cov loss.
         clip_cov_lb (float): Lower bound for clip-cov loss.
         clip_cov_ub (float): Upper bound for clip-cov loss.

@@ -26,6 +26,7 @@ from verl.trainer.ppo.core_algos import (
     compute_grpo_outcome_advantage,
     compute_grpo_vectorized_outcome_advantage,
     compute_policy_loss_vanilla,
+    compute_rlsd_loss,
     compute_rloo_outcome_advantage,
     compute_rloo_vectorized_outcome_advantage,
     compute_srpo_loss,
@@ -33,6 +34,7 @@ from verl.trainer.ppo.core_algos import (
     get_adv_estimator_fn,
     register_adv_est,
 )
+from verl.workers.config.actor import SelfDistillationConfig
 
 
 def mock_test_fn():
@@ -243,6 +245,10 @@ class _DummySelfDistillationConfig:
         self.hybrid_sdpo_weight = hybrid_sdpo_weight
         self.hybrid_base_policy_loss_mode = "vanilla"
         self.srpo_entropy_weight_beta = 0.0
+        self.rlsd_lambda_init = 0.5
+        self.rlsd_lambda_final = 0.0
+        self.rlsd_lambda_decay_steps = 50
+        self.rlsd_weight_clip = 0.2
 
 
 def test_compute_grpo_sdpo_hybrid_loss_matches_weighted_sum():
@@ -252,7 +258,7 @@ def test_compute_grpo_sdpo_hybrid_loss_matches_weighted_sum():
     old_log_prob = torch.tensor([[0.0, -0.1]], dtype=torch.float32)
     log_prob = torch.tensor([[0.1, -0.2]], dtype=torch.float32)
     teacher_log_prob = torch.tensor([[0.3, -0.5]], dtype=torch.float32)
-    advantages = torch.tensor([[1.0, -0.5]], dtype=torch.float32)
+    advantages = torch.tensor([[1.0, 1.0]], dtype=torch.float32)
     response_mask = torch.tensor([[1.0, 1.0]], dtype=torch.float32)
     self_distillation_mask = torch.tensor([1.0], dtype=torch.float32)
 
@@ -404,6 +410,134 @@ def test_compute_srpo_loss_accepts_bool_masks():
     assert torch.isfinite(srpo_loss)
     assert metrics["srpo/sdpo_route_fraction"] == 0.5
     assert metrics["srpo/grpo_route_fraction"] == 0.5
+
+
+def test_compute_rlsd_loss_matches_manual_reward_anchored_reweighting():
+    config = _DummyActorConfig()
+    sdpo_cfg = _DummySelfDistillationConfig()
+    sdpo_cfg.rlsd_lambda_init = 0.5
+    sdpo_cfg.rlsd_lambda_final = 0.0
+    sdpo_cfg.rlsd_lambda_decay_steps = 50
+    sdpo_cfg.rlsd_weight_clip = 0.2
+
+    old_log_prob = torch.tensor([[0.0, -0.1], [0.2, 0.0]], dtype=torch.float32)
+    log_prob = torch.tensor([[0.1, -0.2], [0.3, -0.2]], dtype=torch.float32)
+    teacher_log_prob = torch.tensor([[0.4, -0.3], [0.1, -0.6]], dtype=torch.float32)
+    advantages = torch.tensor([[1.0, 1.0], [-0.5, -0.5]], dtype=torch.float32)
+    response_mask = torch.tensor([[1.0, 1.0], [1.0, 1.0]], dtype=torch.float32)
+    self_distillation_mask = torch.tensor([1.0, 0.0], dtype=torch.float32)
+
+    sequence_signs = torch.sign((advantages * response_mask).sum(dim=-1) / response_mask.sum(dim=-1).clamp(min=1.0))
+    teacher_gap = (teacher_log_prob - log_prob).detach()
+    manual_reweights = torch.exp(sequence_signs.unsqueeze(1) * teacher_gap)
+    manual_reweights = manual_reweights.clamp(min=0.8, max=1.2)
+    manual_multiplier = torch.ones_like(manual_reweights)
+    active_mask = response_mask.bool() & self_distillation_mask.unsqueeze(1).bool()
+    manual_multiplier[active_mask] = 0.5 + 0.5 * manual_reweights[active_mask]
+    adjusted_advantages = advantages * manual_multiplier
+
+    expected_loss, _ = compute_policy_loss_vanilla(
+        old_log_prob=old_log_prob,
+        log_prob=log_prob,
+        advantages=adjusted_advantages,
+        response_mask=response_mask,
+        config=config,
+        loss_agg_mode="token-mean",
+    )
+    rlsd_loss, metrics = compute_rlsd_loss(
+        old_log_prob=old_log_prob,
+        log_prob=log_prob,
+        advantages=advantages,
+        response_mask=response_mask,
+        self_distillation_config=sdpo_cfg,
+        config=config,
+        teacher_log_probs=teacher_log_prob,
+        self_distillation_mask=self_distillation_mask,
+        loss_agg_mode="token-mean",
+        current_global_step=0,
+    )
+
+    assert torch.allclose(rlsd_loss, expected_loss)
+    assert metrics["rlsd/lambda"] == pytest.approx(0.5)
+    assert metrics["rlsd/active_sample_fraction"] == pytest.approx(0.5)
+    assert metrics["rlsd/teacher_preferred_token_fraction"] == pytest.approx(0.5)
+
+
+def test_compute_rlsd_loss_decays_to_vanilla_when_lambda_reaches_zero():
+    config = _DummyActorConfig()
+    sdpo_cfg = _DummySelfDistillationConfig()
+    sdpo_cfg.rlsd_lambda_init = 0.5
+    sdpo_cfg.rlsd_lambda_final = 0.0
+    sdpo_cfg.rlsd_lambda_decay_steps = 4
+    sdpo_cfg.rlsd_weight_clip = 0.2
+
+    old_log_prob = torch.tensor([[0.0, -0.1]], dtype=torch.float32)
+    log_prob = torch.tensor([[0.1, -0.2]], dtype=torch.float32)
+    teacher_log_prob = torch.tensor([[0.4, -0.3]], dtype=torch.float32)
+    advantages = torch.tensor([[1.0, -0.5]], dtype=torch.float32)
+    response_mask = torch.tensor([[1.0, 1.0]], dtype=torch.float32)
+    self_distillation_mask = torch.tensor([1.0], dtype=torch.float32)
+
+    vanilla_loss, _ = compute_policy_loss_vanilla(
+        old_log_prob=old_log_prob,
+        log_prob=log_prob,
+        advantages=advantages,
+        response_mask=response_mask,
+        config=config,
+        loss_agg_mode="token-mean",
+    )
+    rlsd_loss, metrics = compute_rlsd_loss(
+        old_log_prob=old_log_prob,
+        log_prob=log_prob,
+        advantages=advantages,
+        response_mask=response_mask,
+        self_distillation_config=sdpo_cfg,
+        config=config,
+        teacher_log_probs=teacher_log_prob,
+        self_distillation_mask=self_distillation_mask,
+        loss_agg_mode="token-mean",
+        current_global_step=8,
+    )
+
+    assert torch.allclose(rlsd_loss, vanilla_loss)
+    assert metrics["rlsd/lambda"] == pytest.approx(0.0)
+
+
+def test_compute_rlsd_loss_rejects_token_varying_advantages():
+    config = _DummyActorConfig()
+    sdpo_cfg = _DummySelfDistillationConfig()
+
+    old_log_prob = torch.tensor([[0.0, -0.1]], dtype=torch.float32)
+    log_prob = torch.tensor([[0.1, -0.2]], dtype=torch.float32)
+    teacher_log_prob = torch.tensor([[0.4, -0.3]], dtype=torch.float32)
+    advantages = torch.tensor([[1.0, -0.5]], dtype=torch.float32)
+    response_mask = torch.tensor([[1.0, 1.0]], dtype=torch.float32)
+    self_distillation_mask = torch.tensor([1.0], dtype=torch.float32)
+
+    with pytest.raises(ValueError, match="sequence-constant outcome-style advantages"):
+        compute_rlsd_loss(
+            old_log_prob=old_log_prob,
+            log_prob=log_prob,
+            advantages=advantages,
+            response_mask=response_mask,
+            self_distillation_config=sdpo_cfg,
+            config=config,
+            teacher_log_probs=teacher_log_prob,
+            self_distillation_mask=self_distillation_mask,
+            loss_agg_mode="token-mean",
+            current_global_step=0,
+        )
+
+
+def test_self_distillation_config_rejects_unsafe_rlsd_hyperparameters():
+    with pytest.raises(ValueError, match="rlsd_lambda_init must be in \\[0,1\\]"):
+        SelfDistillationConfig(rlsd_lambda_init=1.1)
+
+    with pytest.raises(ValueError, match="rlsd_lambda_final must be in \\[0,1\\]"):
+        SelfDistillationConfig(rlsd_lambda_final=1.1)
+
+    with pytest.raises(ValueError, match="rlsd_weight_clip must be in \\[0,1\\]"):
+        SelfDistillationConfig(rlsd_weight_clip=1.1)
 
 
 @pytest.mark.parametrize(
