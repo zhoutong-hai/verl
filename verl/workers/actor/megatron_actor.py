@@ -67,6 +67,7 @@ from verl.utils.py_functional import append_to_dict
 from verl.utils.seqlen_balancing import get_reverse_idx, rearrange_micro_batches
 from verl.utils.torch_functional import broadcast_dict_tensor
 from verl.workers.actor import BasePPOActor
+from verl.workers.actor_meta_info import build_megatron_loss_meta_info
 from verl.workers.config import SelfDistillationConfig, uses_self_distillation_loss_mode
 
 __all__ = ["MegatronPPOActor"]
@@ -1487,20 +1488,7 @@ class MegatronPPOActor(BasePPOActor):
             if forward_only:
                 meta_info = None
             else:
-                clip_ratio_c = self.config.get("clip_ratio_c", 3.0)
-                meta_info = {
-                    "clip_ratio": self.config.clip_ratio,
-                    "entropy_coeff": self.config.entropy_coeff,
-                    "clip_ratio_c": clip_ratio_c,
-                    "repair_ce_only": bool(data.meta_info.get("repair_ce_only", False)),
-                    "repair_ce_weight": float(data.meta_info.get("repair_ce_weight", 0.0) or 0.0),
-                    "debug_sdpo_dump_dir": data.meta_info.get("debug_sdpo_dump_dir"),
-                    "debug_sdpo_dump_step": data.meta_info.get("debug_sdpo_dump_step"),
-                    "debug_sdpo_dump_once": data.meta_info.get("debug_sdpo_dump_once"),
-                    "debug_sdpo_global_step": data.meta_info.get("debug_sdpo_global_step"),
-                    "debug_sdpo_experiment_name": data.meta_info.get("debug_sdpo_experiment_name"),
-                    "debug_sdpo_actor_strategy": data.meta_info.get("debug_sdpo_actor_strategy"),
-                }
+                meta_info = build_megatron_loss_meta_info(config=self.config, data_meta_info=data.meta_info)
 
             if RouterReplayHelper.is_r2_record_action(self.tf_config, vp_rank):
                 merge_router_topk_indices(

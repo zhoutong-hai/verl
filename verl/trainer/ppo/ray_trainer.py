@@ -509,9 +509,20 @@ class RayPPOTrainer:
             if len(v) == n:
                 base_data[k] = v
 
+        def _to_json_safe(value):
+            if isinstance(value, np.generic):
+                return value.item()
+            if isinstance(value, np.ndarray):
+                return [_to_json_safe(x) for x in value.tolist()]
+            if isinstance(value, dict):
+                return {k: _to_json_safe(v) for k, v in value.items()}
+            if isinstance(value, (list, tuple)):
+                return [_to_json_safe(x) for x in value]
+            return value
+
         lines = []
         for i in range(n):
-            entry = {k: v[i] for k, v in base_data.items()}
+            entry = {k: _to_json_safe(v[i]) for k, v in base_data.items()}
             lines.append(json.dumps(entry, ensure_ascii=False))
 
         with open(filename, "w") as f:
@@ -945,6 +956,88 @@ class RayPPOTrainer:
         if not isinstance(extra_info, dict):
             return ""
         return str(extra_info.get("scenario", "") or "").strip()
+
+    @staticmethod
+    def _theme_name_from_extra_info(extra_info: Any) -> str:
+        if not isinstance(extra_info, dict):
+            return ""
+        return str(extra_info.get("theme", "") or "").strip()
+
+    @staticmethod
+    def _collect_reward_info_strings(
+        reward_extra_infos_dict: Optional[dict[str, Any]],
+        batch_size: int,
+        key: str,
+    ) -> list[str]:
+        values: list[str] = [""] * batch_size
+        if reward_extra_infos_dict is None:
+            return values
+        raw_values = reward_extra_infos_dict.get(key, [])
+        for i in range(min(len(raw_values), batch_size)):
+            item = raw_values[i]
+            if item is None:
+                continue
+            text = str(item).strip()
+            if text:
+                values[i] = text
+        return values
+
+    @staticmethod
+    def _normalize_validation_metric_component(value: Any, default: str = "unknown") -> str:
+        text = str(value or "").strip()
+        if not text:
+            text = default
+        return text.replace("/", "_")
+
+    @staticmethod
+    def _build_validation_theme_labels(data_sources: np.ndarray, themes: list[str]) -> tuple[np.ndarray, bool]:
+        labels: list[str] = []
+        has_named_theme = False
+        for data_source, theme in zip(data_sources, themes, strict=True):
+            data_source_name = RayPPOTrainer._normalize_validation_metric_component(data_source)
+            theme_name = RayPPOTrainer._normalize_validation_metric_component(theme)
+            labels.append(f"{data_source_name}/{theme_name}")
+            if theme_name != "unknown":
+                has_named_theme = True
+        return np.array(labels, dtype=object), has_named_theme
+
+    @staticmethod
+    def _build_validation_scenario_labels(
+        data_sources: np.ndarray, themes: list[str], scenarios: list[str]
+    ) -> tuple[np.ndarray, bool]:
+        labels: list[str] = []
+        has_named_scenario = False
+        for data_source, theme, scenario in zip(data_sources, themes, scenarios, strict=True):
+            data_source_name = RayPPOTrainer._normalize_validation_metric_component(data_source)
+            theme_name = RayPPOTrainer._normalize_validation_metric_component(theme)
+            scenario_name = RayPPOTrainer._normalize_validation_metric_component(scenario)
+            labels.append(f"{data_source_name}/{theme_name}/{scenario_name}")
+            if scenario_name != "unknown":
+                has_named_scenario = True
+        return np.array(labels, dtype=object), has_named_scenario
+
+    @staticmethod
+    def _extend_validation_metric_section(
+        metric_dict: dict[str, float],
+        *,
+        section_prefix: str,
+        grouped_metrics: dict[str, dict[str, dict[str, float]]],
+    ) -> None:
+        for group_name, var2metric2val in grouped_metrics.items():
+            core_var = "acc" if "acc" in var2metric2val else "reward"
+            for var_name, metric2val in var2metric2val.items():
+                n_max = max([int(name.split("@")[-1].split("/")[0]) for name in metric2val.keys()])
+                for metric_name, metric_val in metric2val.items():
+                    if (
+                        (var_name == core_var)
+                        and any(metric_name.startswith(pfx) for pfx in ["mean", "maj", "best"])
+                        and (f"@{n_max}" in metric_name)
+                    ):
+                        metric_sec = f"{section_prefix}-core"
+                    else:
+                        metric_sec = f"{section_prefix}-aux"
+                    pfx = f"{metric_sec}/{group_name}/{var_name}/{metric_name}"
+                    metric_dict[pfx] = metric_val
 
     @staticmethod
     def _parse_tool_name_from_text(text: Any) -> str:
@@ -1396,12 +1489,6 @@ class RayPPOTrainer:
             batch_size=batch_size,
             key="failed_verifier_trace_json",
         )
-        verifier_trace_list = self._collect_reward_info_strings(
-            include_environment_feedback=self_distillation_cfg.include_environment_feedback,
-            reward_extra_infos_dict=reward_extra_infos_dict,
-            batch_size=batch_size,
-            key="verifier_trace_json",
-        )
         self_distillation_eligible_list = self._collect_reward_info_flags(
             include_environment_feedback=self_distillation_cfg.include_environment_feedback,
             reward_extra_infos_dict=reward_extra_infos_dict,
@@ -1435,11 +1522,7 @@ class RayPPOTrainer:
             if self_distillation_eligible_list[i] <= 0.0:
                 return "", "", "", False, None
             has_solution = solution_strs[i] is not None
-            has_feedback = (
-                feedback_list[i] is not None
-                or failed_verifier_trace_list[i] is not None
-                or verifier_trace_list[i] is not None
-            )
+            has_feedback = feedback_list[i] is not None or failed_verifier_trace_list[i] is not None
             feedback_only_without_solution = self_distillation_cfg.get(
                 "environment_feedback_only_without_solution", False
             )
@@ -1489,11 +1572,8 @@ class RayPPOTrainer:
                     prompt_text=prompt_texts[i],
                     response_text=response_texts[i],
                     solution_section=solution_section,
-                    feedback_section=feedback_section,
                     failed_attempt_section=failed_attempt_section,
-                    feedback_raw=feedback_list[i],
                     failed_verifier_trace_json=failed_verifier_trace_list[i],
-                    verifier_trace_json=verifier_trace_list[i],
                     use_guidance=use_guidance,
                     self_distillation_cfg=self_distillation_cfg,
                     tokenizer=self.tokenizer,
@@ -1835,6 +1915,8 @@ class RayPPOTrainer:
         sample_scores = []
         sample_turns = []
         sample_uids = []
+        sample_themes = []
+        sample_scenarios = []
         sample_first_token_ids = []
         sample_first_token_texts = []
         sample_first_token_is_eos = []
@@ -1929,6 +2011,19 @@ class RayPPOTrainer:
                 else:
                     reward_extra_infos_dict[key].extend(values if isinstance(values, list) else [values])
 
+            batch_size = reward_tensor.shape[0]
+            batch_themes = self._collect_reward_info_strings(reward_extra_info, batch_size, key="theme")
+            batch_scenarios = self._collect_reward_info_strings(reward_extra_info, batch_size, key="scenario")
+            extra_infos = test_batch.non_tensor_batch.get("extra_info", np.array([None] * batch_size, dtype=object))
+            for i in range(batch_size):
+                extra_info = extra_infos[i] if i < len(extra_infos) else None
+                if not batch_themes[i]:
+                    batch_themes[i] = self._theme_name_from_extra_info(extra_info)
+                if not batch_scenarios[i]:
+                    batch_scenarios[i] = self._scenario_name_from_extra_info(extra_info)
+            sample_themes.extend(batch_themes)
+            sample_scenarios.extend(batch_scenarios)
+
             # collect num_turns of each prompt
             if "__num_turns__" in test_batch.non_tensor_batch:
                 sample_turns.append(test_batch.non_tensor_batch["__num_turns__"])
@@ -1968,21 +2063,33 @@ class RayPPOTrainer:
 
         data_src2var2metric2val = process_validation_metrics(data_sources, sample_uids, reward_extra_infos_dict)
         metric_dict = {}
-        for data_source, var2metric2val in data_src2var2metric2val.items():
-            core_var = "acc" if "acc" in var2metric2val else "reward"
-            for var_name, metric2val in var2metric2val.items():
-                n_max = max([int(name.split("@")[-1].split("/")[0]) for name in metric2val.keys()])
-                for metric_name, metric_val in metric2val.items():
-                    if (
-                        (var_name == core_var)
-                        and any(metric_name.startswith(pfx) for pfx in ["mean", "maj", "best"])
-                        and (f"@{n_max}" in metric_name)
-                    ):
-                        metric_sec = "val-core"
-                    else:
-                        metric_sec = "val-aux"
-                    pfx = f"{metric_sec}/{data_source}/{var_name}/{metric_name}"
-                    metric_dict[pfx] = metric_val
+        self._extend_validation_metric_section(
+            metric_dict,
+            section_prefix="val",
+            grouped_metrics=data_src2var2metric2val,
+        )
+
+        if sample_themes:
+            theme_labels, has_named_theme = self._build_validation_theme_labels(data_sources, sample_themes)
+            if has_named_theme:
+                theme_metrics = process_validation_metrics(theme_labels, sample_uids, reward_extra_infos_dict)
+                self._extend_validation_metric_section(
+                    metric_dict,
+                    section_prefix="val-theme",
+                    grouped_metrics=theme_metrics,
+                )
+
+        if sample_themes and sample_scenarios:
+            scenario_labels, has_named_scenario = self._build_validation_scenario_labels(
+                data_sources, sample_themes, sample_scenarios
+            )
+            if has_named_scenario:
+                scenario_metrics = process_validation_metrics(scenario_labels, sample_uids, reward_extra_infos_dict)
+                self._extend_validation_metric_section(
+                    metric_dict,
+                    section_prefix="val-scenario",
+                    grouped_metrics=scenario_metrics,
+                )
 
         if len(sample_turns) > 0:
             sample_turns = np.concatenate(sample_turns)
