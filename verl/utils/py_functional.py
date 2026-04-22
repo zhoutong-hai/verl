@@ -23,7 +23,7 @@ import signal
 from contextlib import contextmanager
 from functools import wraps
 from types import SimpleNamespace
-from typing import Any, Callable, Iterator, Optional
+from typing import Any, Callable, Iterable, Iterator, Optional
 
 
 # --- Top-level helper for multiprocessing timeout ---
@@ -201,6 +201,17 @@ def append_to_dict(data: dict, new_data: dict, prefix: str = ""):
             data[new_key].extend(val)
         else:
             data[new_key].append(val)
+
+
+def ensure_dict_has_keys(data: dict, required_keys: Iterable[str], default: Any = 0.0):
+    """Populate missing keys in ``data`` with a default value.
+
+    This is useful when distributed workers emit metric dictionaries that must
+    share the same schema before concatenation.
+    """
+    for key in required_keys:
+        data.setdefault(key, default)
+    return data
 
 
 class NestedNamespace(SimpleNamespace):

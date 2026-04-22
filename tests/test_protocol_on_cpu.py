@@ -30,6 +30,7 @@ from verl.protocol import (
     union_numpy_dict,
     union_tensor_dict,
 )
+from verl.utils.py_functional import ensure_dict_has_keys
 from verl.utils import tensordict_utils as tu
 
 
@@ -310,6 +311,43 @@ def test_concat_non_list_metrics():
     # Should flatten to dict of lists
     expected_metrics = {"loss": [0.5, 0.6], "accuracy": [0.9, 0.85]}
     assert concat_data.meta_info["metrics"] == expected_metrics
+
+
+def test_concat_metrics_after_normalizing_optional_srpo_keys():
+    obs1 = torch.tensor([1, 2])
+    obs2 = torch.tensor([3, 4])
+
+    optional_keys = [
+        "self_distillation/student_mass_on_teacher_support_mean",
+        "self_distillation/selected_logprob_from_full_abs_diff_mean",
+    ]
+    worker1_metrics = ensure_dict_has_keys(
+        {
+            "actor/pg_loss": 0.5,
+            "self_distillation/student_mass_on_teacher_support_mean": 0.75,
+        },
+        optional_keys,
+        default=0.0,
+    )
+    worker2_metrics = ensure_dict_has_keys(
+        {
+            "actor/pg_loss": 0.6,
+        },
+        optional_keys,
+        default=0.0,
+    )
+
+    data1 = DataProto.from_dict(tensors={"obs": obs1}, meta_info={"metrics": worker1_metrics})
+    data2 = DataProto.from_dict(tensors={"obs": obs2}, meta_info={"metrics": worker2_metrics})
+
+    concat_data = DataProto.concat([data1, data2])
+
+    assert concat_data.meta_info["metrics"]["actor/pg_loss"] == [0.5, 0.6]
+    assert concat_data.meta_info["metrics"]["self_distillation/student_mass_on_teacher_support_mean"] == [0.75, 0.0]
+    assert concat_data.meta_info["metrics"]["self_distillation/selected_logprob_from_full_abs_diff_mean"] == [
+        0.0,
+        0.0,
+    ]
 
 
 def test_concat_merge_different_non_metric_keys():

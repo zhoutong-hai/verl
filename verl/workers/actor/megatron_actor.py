@@ -63,7 +63,7 @@ from verl.utils.megatron.tensor_parallel import vocab_parallel_entropy, vocab_pa
 from verl.utils.megatron_utils import get_model_config, unwrap_model
 from verl.utils.profiler import GPUMemoryLogger
 from verl.utils.profiler.profile import Profiler
-from verl.utils.py_functional import append_to_dict
+from verl.utils.py_functional import append_to_dict, ensure_dict_has_keys
 from verl.utils.seqlen_balancing import get_reverse_idx, rearrange_micro_batches
 from verl.utils.torch_functional import broadcast_dict_tensor
 from verl.workers.actor import BasePPOActor
@@ -74,6 +74,21 @@ __all__ = ["MegatronPPOActor"]
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+_OPTIONAL_SELF_DISTILLATION_METRIC_KEYS = (
+    "self_distillation/student_mass_on_teacher_support_mean",
+    "self_distillation/student_top1_in_teacher_support_fraction",
+    "self_distillation/student_top1_matches_teacher_top1_fraction",
+    "self_distillation/student_top1_prob_mean",
+    "self_distillation/student_teacher_topk_overlap_fraction",
+    "self_distillation/teacher_mass_on_student_support_lower_bound_mean",
+    "self_distillation/teacher_mass_on_student_support_upper_bound_mean",
+    "self_distillation/selected_logprob_from_full_abs_diff_mean",
+    "self_distillation/selected_logprob_from_full_abs_diff_max",
+    "self_distillation/selected_logprob_from_full_fp32_abs_diff_mean",
+    "self_distillation/selected_logprob_from_full_fp32_abs_diff_max",
+    "self_distillation/student_top1_prob_from_full_fp32_mean",
+)
 
 
 class MegatronPPOActor(BasePPOActor):
@@ -761,6 +776,7 @@ class MegatronPPOActor(BasePPOActor):
                             loss_agg_mode=loss_agg_mode,
                             rollout_is_weights=rollout_is_weights,
                         )
+                    ensure_dict_has_keys(pg_metrics, _OPTIONAL_SELF_DISTILLATION_METRIC_KEYS, default=0.0)
                     active_sdpo_mask = response_mask.bool()
                     if "self_distillation_mask" in data:
                         active_sdpo_mask = active_sdpo_mask & data["self_distillation_mask"].unsqueeze(1).bool()
