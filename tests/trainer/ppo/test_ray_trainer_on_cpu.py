@@ -64,6 +64,35 @@ def test_collect_reward_info_strings_and_extra_info_name_helpers():
     assert RayPPOTrainer._scenario_name_from_extra_info({"scenario": " question_answering "}) == "question_answering"
 
 
+def test_collect_reward_info_strings_supports_feedback_gate_and_validation_calls():
+    reward_info = {
+        "failed_verifier_trace_json": ["  trace-a  ", None, "[]", "trace-b"],
+        "theme": ["form_fill", "", None, "  rapport  "],
+    }
+
+    # Validation-style positional call.
+    theme_values = RayPPOTrainer._collect_reward_info_strings(reward_info, 4, "theme")
+    assert theme_values == ["form_fill", "", "", "rapport"]
+
+    # SRPO-style keyword call with environment feedback enabled.
+    trace_values = RayPPOTrainer._collect_reward_info_strings(
+        reward_extra_infos_dict=reward_info,
+        batch_size=4,
+        key="failed_verifier_trace_json",
+        include_environment_feedback=True,
+    )
+    assert trace_values == ["trace-a", "", "", "trace-b"]
+
+    # SRPO-style keyword call with environment feedback disabled.
+    gated_values = RayPPOTrainer._collect_reward_info_strings(
+        reward_extra_infos_dict=reward_info,
+        batch_size=4,
+        key="failed_verifier_trace_json",
+        include_environment_feedback=False,
+    )
+    assert gated_values == ["", "", "", ""]
+
+
 def test_validation_metric_breakdowns_include_theme_and_scenario_sections():
     sample_uids = ["uid1", "uid1", "uid2", "uid2"]
     infos_dict = {

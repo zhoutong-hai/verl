@@ -882,12 +882,12 @@ class RayPPOTrainer:
 
     @staticmethod
     def _collect_reward_info_strings(
-        include_environment_feedback: bool,
         reward_extra_infos_dict: Optional[dict[str, Any]],
         batch_size: int,
         key: str,
-    ) -> list[Optional[str]]:
-        values: list[Optional[str]] = [None] * batch_size
+        include_environment_feedback: bool = True,
+    ) -> list[str]:
+        values: list[str] = [""] * batch_size
         if not include_environment_feedback or reward_extra_infos_dict is None:
             return values
         raw_values = reward_extra_infos_dict.get(key, [])
@@ -962,25 +962,6 @@ class RayPPOTrainer:
         if not isinstance(extra_info, dict):
             return ""
         return str(extra_info.get("theme", "") or "").strip()
-
-    @staticmethod
-    def _collect_reward_info_strings(
-        reward_extra_infos_dict: Optional[dict[str, Any]],
-        batch_size: int,
-        key: str,
-    ) -> list[str]:
-        values: list[str] = [""] * batch_size
-        if reward_extra_infos_dict is None:
-            return values
-        raw_values = reward_extra_infos_dict.get(key, [])
-        for i in range(min(len(raw_values), batch_size)):
-            item = raw_values[i]
-            if item is None:
-                continue
-            text = str(item).strip()
-            if text:
-                values[i] = text
-        return values
 
     @staticmethod
     def _normalize_validation_metric_component(value: Any, default: str = "unknown") -> str:
