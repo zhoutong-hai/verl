@@ -62,6 +62,18 @@ def test_collect_reward_info_strings_and_extra_info_name_helpers():
     assert values == ["lab_guidelines", "", "rapport", ""]
     assert RayPPOTrainer._theme_name_from_extra_info({"theme": " form_fill "}) == "form_fill"
     assert RayPPOTrainer._scenario_name_from_extra_info({"scenario": " question_answering "}) == "question_answering"
+    assert RayPPOTrainer._matches_target_scenario(
+        {"theme": " form_fill ", "scenario": " record_answer "},
+        {"record_answer"},
+    )
+    assert RayPPOTrainer._matches_target_scenario(
+        {"theme": " form_fill ", "scenario": " record_answer "},
+        {"form_fill/record_answer"},
+    )
+    assert not RayPPOTrainer._matches_target_scenario(
+        {"theme": " form_fill ", "scenario": " record_answer "},
+        {"first_30s/identity_verification_failed"},
+    )
 
 
 def test_collect_reward_info_strings_supports_feedback_gate_and_validation_calls():

@@ -964,6 +964,20 @@ class RayPPOTrainer:
         return str(extra_info.get("theme", "") or "").strip()
 
     @staticmethod
+    def _matches_target_scenario(extra_info: Any, target_scenarios: set[str]) -> bool:
+        if not target_scenarios:
+            return True
+        scenario_name = RayPPOTrainer._scenario_name_from_extra_info(extra_info)
+        if not scenario_name:
+            return False
+        if scenario_name in target_scenarios:
+            return True
+        theme_name = RayPPOTrainer._theme_name_from_extra_info(extra_info)
+        if not theme_name:
+            return False
+        return f"{theme_name}/{scenario_name}" in target_scenarios
+
+    @staticmethod
     def _normalize_validation_metric_component(value: Any, default: str = "unknown") -> str:
         text = str(value or "").strip()
         if not text:
@@ -1188,19 +1202,19 @@ class RayPPOTrainer:
         with_solution = 0
 
         for i in range(batch_size):
-            scenario_name = self._scenario_name_from_extra_info(extra_infos[i] if i < len(extra_infos) else None)
+            extra_info = extra_infos[i] if i < len(extra_infos) else None
             solution_text = solution_strs[i] or ""
             if solution_text:
                 with_solution += 1
             sample_active = True
             if repair_require_solution and not solution_text:
                 sample_active = False
-            if sample_active and target_scenarios and scenario_name not in target_scenarios:
+            if sample_active and target_scenarios and not self._matches_target_scenario(extra_info, target_scenarios):
                 sample_active = False
             if sample_active and target_scenarios:
                 scenario_kept += 1
 
-            extra_info = extra_infos[i] if i < len(extra_infos) and isinstance(extra_infos[i], dict) else {}
+            extra_info = extra_info if isinstance(extra_info, dict) else {}
             expected_tool_name = self._parse_tool_name_from_text(
                 extra_info.get("tool_label", "") or extra_info.get("label_tool", "") or solution_text
             )
@@ -1703,7 +1717,7 @@ class RayPPOTrainer:
             if target_scenarios:
                 scenario_mask = torch.tensor(
                     [
-                        self._scenario_name_from_extra_info(extra_infos[i]) in target_scenarios
+                        self._matches_target_scenario(extra_infos[i], target_scenarios)
                         for i in range(batch_size)
                     ],
                     dtype=torch.bool,
@@ -1760,7 +1774,7 @@ class RayPPOTrainer:
             if target_scenarios:
                 scenario_mask = torch.tensor(
                     [
-                        self._scenario_name_from_extra_info(extra_infos[i]) in target_scenarios
+                        self._matches_target_scenario(extra_infos[i], target_scenarios)
                         for i in range(batch_size)
                     ],
                     dtype=torch.bool,
