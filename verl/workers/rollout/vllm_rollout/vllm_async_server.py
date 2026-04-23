@@ -265,12 +265,9 @@ class vLLMHttpServerBase:
         logger.info(f"override_generation_config: {override_generation_config}")
 
         logger.info(f"enable_sleep_mode: {self.config.enable_sleep_mode}")
-        from verl.utils.device import set_expandable_segments
+        if not self.config.enable_sleep_mode:
+            from verl.utils.device import set_expandable_segments
 
-        # vLLM V1's CuMem allocator is incompatible with expandable segments.
-        if os.environ.get("VLLM_USE_V1", "0") == "1":
-            set_expandable_segments(False)
-        elif not self.config.enable_sleep_mode:
             set_expandable_segments(True)
 
         quantization = self.config.quantization
