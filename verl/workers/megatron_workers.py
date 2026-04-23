@@ -726,10 +726,13 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
         # add empty cache after each compute
         aggressive_empty_cache(force_sync=True)
 
+        # vLLM V1's CuMem allocator is incompatible with expandable segments.
+        if os.environ.get("VLLM_USE_V1", "0") == "1":
+            set_expandable_segments(False)
         # FIXME(@wuxibin): megatron+sglang failed with `expandable_segments:True` in ci,
         # can't reproduce it in dev environment, temporary disable it.
         # https://github.com/volcengine/verl/actions/runs/17382936845/job/49344264323?pr=3285
-        if os.environ.get("MEGATRON_CI_DISABLE_EXPANDABLE_SEGMENTS", "0") == "0":
+        elif os.environ.get("MEGATRON_CI_DISABLE_EXPANDABLE_SEGMENTS", "0") == "0":
             set_expandable_segments(True)
 
         # restore random states
