@@ -944,13 +944,18 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
                     "compute_ref_distillation_targets with support_mode='student_topk' "
                     "requires distillation_topk_indices in the batch."
                 )
+        should_return_topk_indices = provided_topk_indices is None
         teacher_log_probs, _, _, teacher_topk_log_probs, teacher_topk_indices = self.ref_policy.compute_log_prob(
             data=data,
             calculate_entropy=False,
             distill_topk=(None if provided_topk_indices is not None else distill_topk),
             topk_indices=provided_topk_indices,
-            return_topk_indices=True,
+            return_topk_indices=should_return_topk_indices,
         )
+        if provided_topk_indices is not None:
+            # Reuse the actor-provided support directly so the ref path can stay on the
+            # low-memory teacher-topk codepath instead of re-materializing full logits.
+            teacher_topk_indices = provided_topk_indices
         output = DataProto.from_dict(
             tensors={
                 "teacher_log_probs": teacher_log_probs,
