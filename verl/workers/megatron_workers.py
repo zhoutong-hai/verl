@@ -1034,11 +1034,14 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
         if self.enable_routing_replay and self.config.actor.router_replay.mode == "R3":
             RouterReplay.set_global_router_replay_action(RouterReplayAction.REPLAY_FORWARD)
 
-        output, entropys, layers_topk_idx, _, _ = self.actor.compute_log_prob(data=data, calculate_entropy=True)
-        output = DataProto.from_dict(
-            tensors={"old_log_probs": output, "entropys": entropys},
-            meta_info={"temperature": self.config.rollout.temperature},
+        calculate_entropy = bool(data.meta_info.get("calculate_entropy", self.config.actor.entropy_coeff != 0.0))
+        output, entropys, layers_topk_idx, _, _ = self.actor.compute_log_prob(
+            data=data, calculate_entropy=calculate_entropy
         )
+        tensors = {"old_log_probs": output}
+        if calculate_entropy:
+            tensors["entropys"] = entropys
+        output = DataProto.from_dict(tensors=tensors, meta_info={"temperature": self.config.rollout.temperature})
         if self.config.actor.router_replay.mode == "R2":
             output.batch["routed_experts"] = layers_topk_idx
 
