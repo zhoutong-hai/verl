@@ -251,6 +251,7 @@ class MegatronPPOActor(BasePPOActor):
             raise NotImplementedError("Megatron fused kernels path does not yet support SDPO top-k extraction.")
         data.meta_info["distill_topk"] = distill_topk
         data.meta_info["return_topk_indices"] = return_topk_indices
+        topk_indices_only = bool(data.meta_info.get("topk_indices_only", False))
 
         def compute_logprobs_fn(output, data, use_dynamic_bsz=False, indices=None):
             response = data["responses"]
@@ -1148,6 +1149,24 @@ class MegatronPPOActor(BasePPOActor):
                             winning_indices = torch.gather(stacked_indices, dim=0, index=winning_rank).squeeze(0)
                             return winning_indices.view_as(local_top1_vals)
 
+                    def distributed_topk_from_shards(
+                        local_logits: torch.Tensor, k: int
+                    ) -> tuple[torch.Tensor, torch.Tensor]:
+                        with torch.no_grad():
+                            local_k = min(k, local_logits.size(-1))
+                            local_topk_logits, local_topk_indices = torch.topk(local_logits.detach(), local_k, dim=-1)
+                            local_topk_indices = local_topk_indices.to(torch.int64) + vocab_start
+                            gathered_logits = [torch.empty_like(local_topk_logits) for _ in range(tp_world_size)]
+                            gathered_indices = [torch.empty_like(local_topk_indices) for _ in range(tp_world_size)]
+                            torch.distributed.all_gather(gathered_logits, local_topk_logits, group=tp_group)
+                            torch.distributed.all_gather(gathered_indices, local_topk_indices, group=tp_group)
+                            candidate_logits = torch.cat(gathered_logits, dim=-1)
+                            candidate_indices = torch.cat(gathered_indices, dim=-1)
+                            global_k = min(k, candidate_logits.size(-1))
+                            topk_logits, topk_positions = torch.topk(candidate_logits, global_k, dim=-1)
+                            topk_indices = torch.gather(candidate_indices, dim=-1, index=topk_positions)
+                            return topk_logits, topk_indices
+
                     assert logits.shape[:2] == label.shape[:2]
                     assert label.shape == label_mask.shape
                     logits.div_(temperature)
@@ -1273,6 +1292,26 @@ class MegatronPPOActor(BasePPOActor):
                                 topk_metrics["selected_log_probs_from_full_abs_diff"] - log_probs
                             ).abs()
                             ret.update(topk_metrics)
+                            return ret
+                        if (
+                            topk_indices_only
+                            and teacher_topk_indices is None
+                            and return_topk_indices
+                            and not log_student_support_metrics
+                        ):
+                            logsumexp = distributed_logsumexp_from_shards(logits)
+                            selected_logits_from_full = gather_global_token_logits_from_shards(
+                                logits, label.unsqueeze(-1)
+                            ).squeeze(-1)
+                            selected_log_probs_from_full = selected_logits_from_full - logsumexp.squeeze(-1)
+                            selected_log_probs_from_full = selected_log_probs_from_full.masked_fill(~label_mask, 0.0)
+                            ret["selected_log_probs_from_full_abs_diff"] = (
+                                selected_log_probs_from_full - log_probs
+                            ).abs()
+                            topk = min(distill_topk, local_vocab_size * tp_world_size)
+                            topk_logits, current_topk_indices = distributed_topk_from_shards(logits, topk)
+                            ret["topk_log_probs"] = topk_logits - logsumexp
+                            ret["topk_indices"] = current_topk_indices
                             return ret
                         # SDPO top-k support must be global over the vocabulary, not local to a TP shard.
                         full_logits = tensor_parallel.gather_from_tensor_model_parallel_region(logits)

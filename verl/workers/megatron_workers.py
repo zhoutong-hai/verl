@@ -1001,6 +1001,7 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
         data.meta_info["max_token_len"] = self.config.rollout.log_prob_max_token_len_per_gpu
         data.meta_info["use_dynamic_bsz"] = self.config.rollout.log_prob_use_dynamic_bsz
         data.meta_info["temperature"] = self.config.rollout.temperature
+        data.meta_info["topk_indices_only"] = True
 
         _, _, _, _, student_topk_indices = self.actor.compute_log_prob(
             data=data,
