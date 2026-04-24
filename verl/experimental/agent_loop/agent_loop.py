@@ -38,7 +38,7 @@ from verl.experimental.reward_loop import RewardLoopWorker
 from verl.protocol import DataProto
 from verl.single_controller.ray.base import RayResourcePool, RayWorkerGroup
 from verl.utils import hf_processor, hf_tokenizer
-from verl.utils.chat_template import initialize_system_prompt
+from verl.utils.chat_template import initialize_system_prompt, normalize_string_prompt
 from verl.utils.dataset.rl_dataset import RLHFDataset, get_dataset_class
 from verl.utils.fs import copy_to_local
 from verl.utils.model import compute_position_id_with_mask
@@ -53,6 +53,13 @@ from verl.workers.rollout.replica import TokenOutput, get_rollout_replica_class
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+
+def prepare_raw_prompt(raw_prompt: Any) -> Any:
+    """Preserve string prompts while keeping list-like prompts materialized."""
+    if isinstance(raw_prompt, str):
+        return raw_prompt
+    return list(raw_prompt)
 
 
 def _load_stop_strings_from_env(var_name: str) -> Optional[list[str]]:
@@ -286,6 +293,31 @@ class AgentLoopBase(ABC):
         Returns:
             list[int]: Prompt token ids.
         """
+        if isinstance(messages, str):
+            raw_prompt = normalize_string_prompt(messages, **self.apply_chat_template_kwargs)
+
+            if self.processor is not None:
+                # Preformatted string prompts already include their assistant prefix, so
+                # tokenize them directly instead of reapplying a chat template.
+                model_inputs = self.processor(
+                    text=[raw_prompt],
+                    images=images,
+                    videos=videos,
+                    return_tensors="pt",
+                    do_sample_frames=False,
+                )
+                prompt_ids = model_inputs.pop("input_ids").squeeze(0).tolist()
+            else:
+                prompt_ids = await self.loop.run_in_executor(
+                    None,
+                    lambda: self.tokenizer(raw_prompt, add_special_tokens=False)["input_ids"],
+                )
+
+            if remove_system_prompt and prompt_ids[: len(self.system_prompt)] == self.system_prompt:
+                prompt_ids = prompt_ids[len(self.system_prompt) :]
+
+            return prompt_ids
+
         if self.processor is not None:
             raw_prompt = await self.loop.run_in_executor(
                 None,

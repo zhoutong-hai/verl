@@ -17,7 +17,7 @@ import re
 from typing import Any
 from uuid import uuid4
 
-from verl.experimental.agent_loop.agent_loop import AgentLoopBase, AgentLoopOutput, register
+from verl.experimental.agent_loop.agent_loop import AgentLoopBase, AgentLoopOutput, prepare_raw_prompt, register
 from verl.utils.profiler import simple_timer
 
 logger = logging.getLogger(__file__)
@@ -78,7 +78,7 @@ class SingleTurnAgentLoop(AgentLoopBase):
         return truncated_token_ids, None
 
     async def run(self, sampling_params: dict[str, Any], **kwargs) -> AgentLoopOutput:
-        messages = list(kwargs["raw_prompt"])
+        messages = prepare_raw_prompt(kwargs["raw_prompt"])
 
         # 1. extract images and videos from messages
         multi_modal_data = await self.process_vision_info(messages)

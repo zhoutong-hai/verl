@@ -1,9 +1,15 @@
 # Copyright 2025 Bytedance Ltd. and/or its affiliates
 import logging
 import os
+import re
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+
+_QWEN3_TRAILING_AGENT_PREFIX_RE = re.compile(
+    r"(?s)(<\|im_start\|>assistant\n)\s*Agent:\s*(?:<\|im_end\|>\s*)?\Z"
+)
 
 
 def initialize_system_prompt(tokenizer, **apply_chat_template_kwargs) -> list[int]:
@@ -42,3 +48,21 @@ def extract_system_prompt_and_generation(tokenizer):
     generate_prompt = token3[len(token1) :]
 
     return system_prompt, generate_prompt
+
+
+def normalize_string_prompt(prompt: str, **apply_chat_template_kwargs) -> str:
+    """Normalize preformatted string prompts before tokenization.
+
+    Some Qwen-formatted datasets serialize the final assistant cue as a closed turn
+    like ``<|im_start|>assistant\\nAgent:<|im_end|>``. That boundary nudges Qwen3
+    back into its thinking-format markers at generation time. When the caller
+    explicitly disables thinking, normalize the trailing cue into the open
+    generation-prefix form ``<|im_start|>assistant\\nAgent: ``.
+    """
+    if not isinstance(prompt, str):
+        return prompt
+
+    if apply_chat_template_kwargs.get("enable_thinking") is False:
+        return _QWEN3_TRAILING_AGENT_PREFIX_RE.sub(r"\1Agent: ", prompt)
+
+    return prompt

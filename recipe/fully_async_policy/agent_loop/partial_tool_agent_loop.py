@@ -19,7 +19,7 @@ import os
 from typing import Any, Optional
 from uuid import uuid4
 
-from verl.experimental.agent_loop.agent_loop import AgentLoopOutput, register
+from verl.experimental.agent_loop.agent_loop import AgentLoopOutput, prepare_raw_prompt, register
 from verl.experimental.agent_loop.tool_agent_loop import AgentData, AgentState, ToolAgentLoop
 from verl.utils.profiler import simple_timer
 
@@ -82,7 +82,7 @@ class AsyncPartialToolAgentLoop(ToolAgentLoop):
             return self._build_cancelled_output(agent_data, state)
 
     async def _init_agent_data(self, kwargs: dict, param_version: int) -> AgentData:
-        messages = list(kwargs["raw_prompt"])
+        messages = prepare_raw_prompt(kwargs["raw_prompt"])
         image_data = copy.deepcopy(kwargs.get("multi_modal_data", {}).get("image", None))
         metrics = {}
         request_id = uuid4().hex

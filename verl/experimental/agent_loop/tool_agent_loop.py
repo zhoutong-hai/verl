@@ -28,6 +28,7 @@ from verl.experimental.agent_loop.agent_loop import (
     AgentLoopOutput,
     AsyncLLMServerManager,
     DictConfigWrap,
+    prepare_raw_prompt,
     register,
 )
 from verl.experimental.agent_loop.tool_parser import FunctionCall, ToolParser
@@ -132,7 +133,7 @@ class ToolAgentLoop(AgentLoopBase):
 
     @rollout_trace_op
     async def run(self, sampling_params: dict[str, Any], **kwargs) -> AgentLoopOutput:
-        messages = list(kwargs["raw_prompt"])
+        messages = prepare_raw_prompt(kwargs["raw_prompt"])
 
         # extract images and videos from messages
         multi_modal_data = await self.process_vision_info(messages)

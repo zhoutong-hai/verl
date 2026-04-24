@@ -17,7 +17,7 @@ from typing import Any, Optional
 from uuid import uuid4
 
 from verl.experimental.agent_loop import AgentLoopBase
-from verl.experimental.agent_loop.agent_loop import AgentLoopOutput, register
+from verl.experimental.agent_loop.agent_loop import AgentLoopOutput, prepare_raw_prompt, register
 from verl.utils.profiler import simple_timer
 
 logger = logging.getLogger(__file__)
@@ -36,7 +36,7 @@ class PartialSingleTurnAgentLoop(AgentLoopBase):
 
     async def run(self, sampling_params: dict[str, Any], **kwargs) -> AgentLoopOutput:
         output: Optional[AgentLoopOutput] = kwargs.get("output", None)
-        messages = list(kwargs["raw_prompt"])
+        messages = prepare_raw_prompt(kwargs["raw_prompt"])
         param_version = kwargs.get("param_version", 0)
 
         metrics = {}
