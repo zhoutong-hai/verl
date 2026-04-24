@@ -251,7 +251,6 @@ class MegatronPPOActor(BasePPOActor):
             raise NotImplementedError("Megatron fused kernels path does not yet support SDPO top-k extraction.")
         data.meta_info["distill_topk"] = distill_topk
         data.meta_info["return_topk_indices"] = return_topk_indices
-        topk_indices_only = bool(data.meta_info.get("topk_indices_only", False))
 
         def compute_logprobs_fn(output, data, use_dynamic_bsz=False, indices=None):
             response = data["responses"]
@@ -535,6 +534,7 @@ class MegatronPPOActor(BasePPOActor):
         temperature = data.meta_info["temperature"]
         distill_topk = data.meta_info.get("distill_topk", None)
         return_topk_indices = data.meta_info.get("return_topk_indices", False)
+        topk_indices_only = bool(data.meta_info.get("topk_indices_only", False))
         raw_self_distillation_cfg = getattr(self.config, "self_distillation", None)
         if raw_self_distillation_cfg is not None:
             self_distillation_cfg_forward = omega_conf_to_dataclass(
