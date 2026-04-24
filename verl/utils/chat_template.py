@@ -12,6 +12,19 @@ _QWEN3_TRAILING_AGENT_PREFIX_RE = re.compile(
 )
 
 
+def _thinking_disabled(apply_chat_template_kwargs: dict) -> bool:
+    """Return whether the caller explicitly requested Qwen non-thinking mode.
+
+    Recent Qwen tokenizer versions use ``thinking=False`` while some earlier
+    examples used ``enable_thinking=False``. We accept either knob so the raw
+    string path stays aligned with the structured-message path.
+    """
+    return (
+        apply_chat_template_kwargs.get("thinking") is False
+        or apply_chat_template_kwargs.get("enable_thinking") is False
+    )
+
+
 def initialize_system_prompt(tokenizer, **apply_chat_template_kwargs) -> list[int]:
     """
     Initialize system prompt tokens for chat templates that support them.
@@ -62,7 +75,7 @@ def normalize_string_prompt(prompt: str, **apply_chat_template_kwargs) -> str:
     if not isinstance(prompt, str):
         return prompt
 
-    if apply_chat_template_kwargs.get("enable_thinking") is False:
+    if _thinking_disabled(apply_chat_template_kwargs):
         return _QWEN3_TRAILING_AGENT_PREFIX_RE.sub(r"\1Agent: ", prompt)
 
     return prompt
