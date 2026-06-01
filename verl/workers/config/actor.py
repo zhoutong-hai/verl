@@ -36,7 +36,9 @@ __all__ = [
     "uses_self_distillation_loss_mode",
 ]
 
-SELF_DISTILLATION_LOSS_MODES = frozenset({"sdpo", "sdpo_grpo_hybrid", "sdpo_grpo_adv_hybrid", "srpo", "rlsd"})
+SELF_DISTILLATION_LOSS_MODES = frozenset(
+    {"sdpo", "sdpo_grpo_hybrid", "sdpo_grpo_adv_hybrid", "srpo", "rlsd", "srpo_rlsd"}
+)
 
 
 def uses_self_distillation_loss_mode(loss_mode: str) -> bool:
@@ -105,7 +107,10 @@ class SelfDistillationConfig(BaseConfig):
     srpo_correctness_require_nonblank: bool = True
     srpo_require_nonblank_output: bool = True
     srpo_target_scenarios: list[str] = field(default_factory=list)
+    srpo_token_weight_mode: str = "teacher_entropy"
     srpo_entropy_weight_beta: float = 1.0
+    srpo_gap_weight_beta: float = 5.0
+    srpo_token_weight_normalize_active_mean: bool = True
     rlsd_lambda_init: float = 0.5
     rlsd_lambda_final: float = 0.0
     rlsd_lambda_decay_steps: int = 50
@@ -180,10 +185,21 @@ class SelfDistillationConfig(BaseConfig):
                 "self_distillation.srpo_correctness_threshold must be non-negative, "
                 f"got {self.srpo_correctness_threshold}"
             )
+        valid_srpo_token_weight_modes = ["none", "teacher_entropy", "teacher_student_gap", "student_teacher_gap"]
+        if self.srpo_token_weight_mode not in valid_srpo_token_weight_modes:
+            raise ValueError(
+                "self_distillation.srpo_token_weight_mode must be one of "
+                f"{valid_srpo_token_weight_modes}, got {self.srpo_token_weight_mode}"
+            )
         if self.srpo_entropy_weight_beta < 0.0:
             raise ValueError(
                 "self_distillation.srpo_entropy_weight_beta must be non-negative, "
                 f"got {self.srpo_entropy_weight_beta}"
+            )
+        if self.srpo_gap_weight_beta < 0.0:
+            raise ValueError(
+                "self_distillation.srpo_gap_weight_beta must be non-negative, "
+                f"got {self.srpo_gap_weight_beta}"
             )
         if not 0.0 <= self.rlsd_lambda_init <= 1.0:
             raise ValueError(

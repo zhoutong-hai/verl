@@ -25,6 +25,7 @@ __all__ = [
     "compute_grpo_sdpo_hybrid_loss",
     "compute_grpo_sdpo_adv_hybrid_loss",
     "compute_srpo_loss",
+    "compute_srpo_rlsd_loss",
     "compute_rlsd_loss",
     "compute_repair_ce_loss",
 ]
@@ -1044,62 +1045,116 @@ def compute_repair_ce_loss(
     return loss, metrics
 
 
-def _compute_srpo_entropy_weights(
+def _compute_srpo_token_weights(
     *,
     self_distillation_config: Any,
     response_mask: torch.Tensor,
     self_distillation_mask: Optional[torch.Tensor],
+    student_log_probs: torch.Tensor,
+    teacher_log_probs: torch.Tensor,
     teacher_all_log_probs: Optional[torch.Tensor] = None,
     student_all_log_probs: Optional[torch.Tensor] = None,
     teacher_topk_log_probs: Optional[torch.Tensor] = None,
     student_topk_log_probs: Optional[torch.Tensor] = None,
 ) -> tuple[Optional[torch.Tensor], dict[str, float]]:
-    beta = float(getattr(self_distillation_config, "srpo_entropy_weight_beta", 0.0))
-    if beta <= 0.0:
-        return None, {
-            "srpo/teacher_entropy_mean": 0.0,
-            "srpo/entropy_weight_mean": 0.0,
-            "srpo/entropy_weight_min": 0.0,
-            "srpo/entropy_weight_max": 0.0,
-        }
-
-    if not self_distillation_config.full_logit_distillation:
-        raise ValueError("SRPO entropy weighting requires full_logit_distillation=True.")
-
-    _, teacher_distill_log_probs = _prepare_self_distillation_log_probs(
-        self_distillation_config=self_distillation_config,
-        student_all_log_probs=student_all_log_probs,
-        teacher_all_log_probs=teacher_all_log_probs,
-        student_topk_log_probs=student_topk_log_probs,
-        teacher_topk_log_probs=teacher_topk_log_probs,
-    )
-    teacher_probs = teacher_distill_log_probs.exp()
-    teacher_entropy = -(teacher_probs * teacher_distill_log_probs).sum(dim=-1)
-
     loss_mask = response_mask
     if self_distillation_mask is not None:
         loss_mask = loss_mask * self_distillation_mask.unsqueeze(1)
     active_mask = loss_mask.bool()
 
+    mode = str(getattr(self_distillation_config, "srpo_token_weight_mode", "teacher_entropy"))
     metrics = {
+        "srpo/token_weight_mode_id": {
+            "none": 0.0,
+            "teacher_entropy": 1.0,
+            "teacher_student_gap": 2.0,
+            "student_teacher_gap": 3.0,
+        }.get(mode, -1.0),
+        "srpo/token_weight_mean": 0.0,
+        "srpo/token_weight_min": 0.0,
+        "srpo/token_weight_max": 0.0,
+        "srpo/token_weight_p10": 0.0,
+        "srpo/token_weight_p50": 0.0,
+        "srpo/token_weight_p90": 0.0,
+        "srpo/gap_delta_mean": 0.0,
+        "srpo/gap_delta_abs_mean": 0.0,
+        "srpo/gap_positive_fraction": 0.0,
+        "srpo/gap_negative_fraction": 0.0,
+        "srpo/gap_gate_mean": 0.0,
+        "srpo/gap_gate_min": 0.0,
+        "srpo/gap_gate_max": 0.0,
         "srpo/teacher_entropy_mean": 0.0,
         "srpo/entropy_weight_mean": 0.0,
         "srpo/entropy_weight_min": 0.0,
         "srpo/entropy_weight_max": 0.0,
     }
-    if not active_mask.any():
+    if mode == "none" or not active_mask.any():
         return None, metrics
 
-    raw_weights = torch.exp(-beta * teacher_entropy)
-    normalized_weights = torch.ones_like(raw_weights)
-    active_mean = raw_weights[active_mask].mean().clamp(min=1e-8)
-    normalized_weights[active_mask] = raw_weights[active_mask] / active_mean
+    if mode == "teacher_entropy":
+        beta = float(getattr(self_distillation_config, "srpo_entropy_weight_beta", 0.0))
+        if beta <= 0.0:
+            return None, metrics
+        if not self_distillation_config.full_logit_distillation:
+            raise ValueError("SRPO entropy weighting requires full_logit_distillation=True.")
 
-    metrics["srpo/teacher_entropy_mean"] = teacher_entropy[active_mask].mean().detach().item()
-    metrics["srpo/entropy_weight_mean"] = normalized_weights[active_mask].mean().detach().item()
-    metrics["srpo/entropy_weight_min"] = normalized_weights[active_mask].min().detach().item()
-    metrics["srpo/entropy_weight_max"] = normalized_weights[active_mask].max().detach().item()
-    return normalized_weights, metrics
+        _, teacher_distill_log_probs = _prepare_self_distillation_log_probs(
+            self_distillation_config=self_distillation_config,
+            student_all_log_probs=student_all_log_probs,
+            teacher_all_log_probs=teacher_all_log_probs,
+            student_topk_log_probs=student_topk_log_probs,
+            teacher_topk_log_probs=teacher_topk_log_probs,
+        )
+        teacher_probs = teacher_distill_log_probs.exp()
+        teacher_entropy = -(teacher_probs * teacher_distill_log_probs).sum(dim=-1).detach()
+        raw_weights = torch.exp(-beta * teacher_entropy)
+
+        metrics["srpo/teacher_entropy_mean"] = teacher_entropy[active_mask].mean().detach().item()
+        metrics["srpo/entropy_weight_mean"] = raw_weights[active_mask].mean().detach().item()
+        metrics["srpo/entropy_weight_min"] = raw_weights[active_mask].min().detach().item()
+        metrics["srpo/entropy_weight_max"] = raw_weights[active_mask].max().detach().item()
+    elif mode in {"teacher_student_gap", "student_teacher_gap"}:
+        beta = float(getattr(self_distillation_config, "srpo_gap_weight_beta", 5.0))
+        gap_delta = (teacher_log_probs - student_log_probs).detach()
+        gate_delta = gap_delta if mode == "teacher_student_gap" else -gap_delta
+        raw_weights = torch.sigmoid(beta * gate_delta)
+
+        active_delta = gap_delta[active_mask]
+        active_gate = raw_weights[active_mask]
+        metrics["srpo/gap_delta_mean"] = active_delta.mean().detach().item()
+        metrics["srpo/gap_delta_abs_mean"] = active_delta.abs().mean().detach().item()
+        metrics["srpo/gap_positive_fraction"] = (active_delta > 0).to(torch.float32).mean().detach().item()
+        metrics["srpo/gap_negative_fraction"] = (active_delta < 0).to(torch.float32).mean().detach().item()
+        metrics["srpo/gap_gate_mean"] = active_gate.mean().detach().item()
+        metrics["srpo/gap_gate_min"] = active_gate.min().detach().item()
+        metrics["srpo/gap_gate_max"] = active_gate.max().detach().item()
+    else:
+        raise ValueError(f"Unsupported SRPO token weight mode: {mode}")
+
+    token_weights = torch.ones_like(raw_weights)
+    token_weights[active_mask] = raw_weights[active_mask]
+
+    normalize_active_mean = bool(getattr(self_distillation_config, "srpo_token_weight_normalize_active_mean", True))
+    if normalize_active_mean:
+        active_mean = token_weights[active_mask].mean().clamp(min=1e-8)
+        token_weights[active_mask] = token_weights[active_mask] / active_mean
+
+    active_weights = token_weights[active_mask]
+    metrics["srpo/token_weight_mean"] = active_weights.mean().detach().item()
+    metrics["srpo/token_weight_min"] = active_weights.min().detach().item()
+    metrics["srpo/token_weight_max"] = active_weights.max().detach().item()
+    quantiles = torch.quantile(
+        active_weights.detach().to(torch.float32),
+        torch.tensor([0.1, 0.5, 0.9], device=active_weights.device),
+    )
+    metrics["srpo/token_weight_p10"] = quantiles[0].item()
+    metrics["srpo/token_weight_p50"] = quantiles[1].item()
+    metrics["srpo/token_weight_p90"] = quantiles[2].item()
+    if mode == "teacher_entropy":
+        metrics["srpo/entropy_weight_mean"] = active_weights.mean().detach().item()
+        metrics["srpo/entropy_weight_min"] = active_weights.min().detach().item()
+        metrics["srpo/entropy_weight_max"] = active_weights.max().detach().item()
+    return token_weights, metrics
 
 
 def _compute_routed_loss_rescale(
@@ -1388,10 +1443,12 @@ def compute_srpo_loss(
         rollout_is_weights=rollout_is_weights,
     )
 
-    token_weights, entropy_metrics = _compute_srpo_entropy_weights(
+    token_weights, token_weight_metrics = _compute_srpo_token_weights(
         self_distillation_config=self_distillation_config,
         response_mask=response_mask,
         self_distillation_mask=sdpo_route_mask,
+        student_log_probs=log_prob,
+        teacher_log_probs=teacher_log_probs,
         teacher_all_log_probs=teacher_all_log_probs,
         student_all_log_probs=student_all_log_probs,
         teacher_topk_log_probs=teacher_topk_log_probs,
@@ -1423,7 +1480,7 @@ def compute_srpo_loss(
 
     srpo_metrics = dict(grpo_metrics)
     srpo_metrics.update(sdpo_metrics)
-    srpo_metrics.update(entropy_metrics)
+    srpo_metrics.update(token_weight_metrics)
     srpo_metrics["srpo/grpo_route_fraction"] = grpo_route_mask.mean().detach().item()
     srpo_metrics["srpo/sdpo_route_fraction"] = sdpo_route_mask.mean().detach().item()
     srpo_metrics["srpo/grpo_route_token_fraction"] = (
@@ -1438,6 +1495,64 @@ def compute_srpo_loss(
     srpo_metrics["srpo/sdpo_loss_rescaled"] = sdpo_loss_rescaled.detach().item()
     srpo_metrics["srpo/combined_loss"] = combined_loss.detach().item()
     return combined_loss, srpo_metrics
+
+
+def compute_srpo_rlsd_loss(
+    *,
+    old_log_prob: torch.Tensor,
+    log_prob: torch.Tensor,
+    advantages: torch.Tensor,
+    response_mask: torch.Tensor,
+    self_distillation_config: Any,
+    config: ActorConfig,
+    teacher_log_probs: torch.Tensor,
+    self_distillation_mask: Optional[torch.Tensor] = None,
+    loss_agg_mode: str = "token-mean",
+    rollout_is_weights: Optional[torch.Tensor] = None,
+    current_global_step: int = -1,
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    route_mask_dtype = log_prob.dtype if log_prob.is_floating_point() else torch.float32
+    if self_distillation_mask is None:
+        rlsd_route_mask = torch.ones(
+            (response_mask.shape[0],), device=response_mask.device, dtype=route_mask_dtype
+        )
+    else:
+        rlsd_route_mask = self_distillation_mask.to(device=response_mask.device, dtype=route_mask_dtype)
+    grpo_route_mask = (1.0 - rlsd_route_mask).clamp(min=0.0, max=1.0)
+
+    combined_loss, rlsd_metrics = compute_rlsd_loss(
+        old_log_prob=old_log_prob,
+        log_prob=log_prob,
+        advantages=advantages,
+        response_mask=response_mask,
+        self_distillation_config=self_distillation_config,
+        config=config,
+        teacher_log_probs=teacher_log_probs,
+        self_distillation_mask=rlsd_route_mask,
+        loss_agg_mode=loss_agg_mode,
+        rollout_is_weights=rollout_is_weights,
+        current_global_step=current_global_step,
+    )
+
+    srpo_rlsd_metrics = dict(rlsd_metrics)
+    srpo_rlsd_metrics["srpo/grpo_route_fraction"] = grpo_route_mask.mean().detach().item()
+    srpo_rlsd_metrics["srpo/sdpo_route_fraction"] = rlsd_route_mask.mean().detach().item()
+    srpo_rlsd_metrics["srpo/grpo_route_token_fraction"] = (
+        (response_mask * grpo_route_mask.unsqueeze(1)).sum() / response_mask.sum().clamp(min=1.0)
+    ).detach().item()
+    srpo_rlsd_metrics["srpo/sdpo_route_token_fraction"] = (
+        (response_mask * rlsd_route_mask.unsqueeze(1)).sum() / response_mask.sum().clamp(min=1.0)
+    ).detach().item()
+    srpo_rlsd_metrics["srpo_rlsd/grpo_route_fraction"] = srpo_rlsd_metrics["srpo/grpo_route_fraction"]
+    srpo_rlsd_metrics["srpo_rlsd/rlsd_route_fraction"] = srpo_rlsd_metrics["srpo/sdpo_route_fraction"]
+    srpo_rlsd_metrics["srpo_rlsd/grpo_route_token_fraction"] = srpo_rlsd_metrics[
+        "srpo/grpo_route_token_fraction"
+    ]
+    srpo_rlsd_metrics["srpo_rlsd/rlsd_route_token_fraction"] = srpo_rlsd_metrics[
+        "srpo/sdpo_route_token_fraction"
+    ]
+    srpo_rlsd_metrics["srpo_rlsd/combined_loss"] = combined_loss.detach().item()
+    return combined_loss, srpo_rlsd_metrics
 
 
 def compute_grpo_sdpo_adv_hybrid_loss(

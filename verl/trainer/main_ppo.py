@@ -133,7 +133,7 @@ class TaskRunner:
         self_distillation_needs_ref = (
             self_distillation_cfg is not None and uses_self_distillation_loss_mode(loss_mode)
         )
-        if loss_mode == "rlsd":
+        if loss_mode in {"rlsd", "srpo_rlsd"}:
             adv_estimator = config.algorithm.adv_estimator
             if adv_estimator not in {
                 AdvantageEstimator.GRPO,

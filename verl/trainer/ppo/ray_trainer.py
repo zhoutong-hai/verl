@@ -1367,11 +1367,13 @@ class RayPPOTrainer:
             raw_self_distillation_cfg,
             dataclass_type=SelfDistillationConfig,
         )
-        if teacher_batch.batch["self_distillation_mask"].sum().item() == 0:
+        self_distillation_mask = teacher_batch.batch["self_distillation_mask"]
+        active_row_mask = self_distillation_mask.bool()
+        if active_row_mask.sum().item() == 0:
             zeros = torch.zeros_like(teacher_batch.batch["response_mask"], dtype=torch.float32)
             tensors = {
                 "teacher_log_probs": zeros,
-                "self_distillation_mask": teacher_batch.batch["self_distillation_mask"],
+                "self_distillation_mask": self_distillation_mask,
             }
             if self_distillation_cfg.full_logit_distillation:
                 if self_distillation_cfg.distillation_topk is None:
@@ -1381,21 +1383,25 @@ class RayPPOTrainer:
                 tensors["teacher_topk_indices"] = torch.zeros(topk_shape, dtype=torch.int64, device=zeros.device)
             return DataProto.from_dict(tensors=tensors)
 
+        teacher_active_mask = active_row_mask.to(device=teacher_batch.batch["responses"].device)
+        active_teacher_batch = teacher_batch.select_idxs(teacher_active_mask)
         student_support = None
         if self_distillation_cfg.full_logit_distillation and self_distillation_cfg.support_mode == "student_topk":
             if actor_batch is None:
                 raise ValueError(
                     "support_mode='student_topk' requires the original actor batch when building teacher targets."
                 )
-            student_support = self._compute_self_distillation_student_support(actor_batch)
+            actor_active_mask = active_row_mask.to(device=actor_batch.batch["responses"].device)
+            active_actor_batch = actor_batch.select_idxs(actor_active_mask)
+            student_support = self._compute_self_distillation_student_support(active_actor_batch)
 
         ref_input = DataProto.from_dict(
             tensors={
-                "responses": teacher_batch.batch["responses"],
-                "response_mask": teacher_batch.batch["response_mask"],
-                "input_ids": teacher_batch.batch["teacher_input_ids"],
-                "attention_mask": teacher_batch.batch["teacher_attention_mask"],
-                "position_ids": teacher_batch.batch["teacher_position_ids"],
+                "responses": active_teacher_batch.batch["responses"],
+                "response_mask": active_teacher_batch.batch["response_mask"],
+                "input_ids": active_teacher_batch.batch["teacher_input_ids"],
+                "attention_mask": active_teacher_batch.batch["teacher_attention_mask"],
+                "position_ids": active_teacher_batch.batch["teacher_position_ids"],
             }
         )
         if student_support is not None:
@@ -1409,7 +1415,39 @@ class RayPPOTrainer:
         else:
             teacher_log_prob = self._compute_ref_log_prob(ref_input)
             teacher_log_prob.batch["teacher_log_probs"] = teacher_log_prob.batch.pop("ref_log_prob")
-        passthrough_tensors = {"self_distillation_mask": teacher_batch.batch["self_distillation_mask"]}
+
+        teacher_target_device = teacher_log_prob.batch["teacher_log_probs"].device
+        active_row_mask_on_target = active_row_mask.to(device=teacher_target_device)
+        response_mask = teacher_batch.batch["response_mask"]
+        batch_size, response_len = response_mask.shape
+        teacher_log_probs = teacher_log_prob.batch["teacher_log_probs"]
+        full_teacher_tensors = {
+            "teacher_log_probs": torch.zeros(
+                (batch_size, response_len),
+                dtype=teacher_log_probs.dtype,
+                device=teacher_target_device,
+            ),
+        }
+        full_teacher_tensors["teacher_log_probs"][active_row_mask_on_target] = teacher_log_probs
+        if self_distillation_cfg.full_logit_distillation:
+            teacher_topk_log_probs = teacher_log_prob.batch["teacher_topk_log_probs"]
+            teacher_topk_indices = teacher_log_prob.batch["teacher_topk_indices"]
+            full_teacher_tensors["teacher_topk_log_probs"] = torch.zeros(
+                (batch_size, response_len, teacher_topk_log_probs.shape[-1]),
+                dtype=teacher_topk_log_probs.dtype,
+                device=teacher_topk_log_probs.device,
+            )
+            full_teacher_tensors["teacher_topk_indices"] = torch.zeros(
+                (batch_size, response_len, teacher_topk_indices.shape[-1]),
+                dtype=teacher_topk_indices.dtype,
+                device=teacher_topk_indices.device,
+            )
+            full_teacher_tensors["teacher_topk_log_probs"][active_row_mask_on_target] = teacher_topk_log_probs
+            full_teacher_tensors["teacher_topk_indices"][active_row_mask_on_target] = teacher_topk_indices
+
+        passthrough_tensors = {
+            "self_distillation_mask": self_distillation_mask.to(device=teacher_target_device),
+        }
         for key in (
             "repair_input_ids",
             "repair_attention_mask",
@@ -1420,9 +1458,10 @@ class RayPPOTrainer:
             "repair_sample_mask",
         ):
             if key in teacher_batch.batch:
-                passthrough_tensors[key] = teacher_batch.batch[key]
-        teacher_log_prob = teacher_log_prob.union(DataProto.from_dict(tensors=passthrough_tensors))
-        return teacher_log_prob
+                passthrough_tensors[key] = teacher_batch.batch[key].to(device=teacher_target_device)
+        full_teacher_targets = DataProto.from_dict(tensors=full_teacher_tensors)
+        full_teacher_targets = full_teacher_targets.union(DataProto.from_dict(tensors=passthrough_tensors))
+        return full_teacher_targets
 
     def _compute_ref_distillation_targets(self, batch: DataProto) -> DataProto:
         if self.use_legacy_worker_impl == "disable":
@@ -1446,27 +1485,17 @@ class RayPPOTrainer:
         if "raw_prompt" not in batch.non_tensor_batch:
             raise ValueError("SDPO requires raw_prompt in batch.non_tensor_batch.")
 
+        batch_size = batch.batch.batch_size[0]
         device = batch.batch["input_ids"].device
         responses = batch.batch["responses"]
         response_mask = batch.batch["response_mask"]
         raw_prompts = batch.non_tensor_batch["raw_prompt"]
-        response_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in responses]
-        batch_size = batch.batch.batch_size[0]
+        response_token_id_lists = [responses[i][response_mask[i].bool()].tolist() for i in range(batch_size)]
+        response_texts = self.tokenizer.batch_decode(response_token_id_lists, skip_special_tokens=True)
         extra_infos = batch.non_tensor_batch.get("extra_info", np.array([None] * batch_size, dtype=object))
         dump_teacher_prompt_text = bool(self_distillation_cfg.get("dump_teacher_prompt_text", False))
         dump_teacher_prompt_max_chars = int(self_distillation_cfg.get("dump_teacher_prompt_max_chars", 0) or 0)
         custom_teacher_prompt_fn = self._custom_teacher_prompt_fn
-        if custom_teacher_prompt_fn is None:
-            prompt_texts: list[Optional[str]] = [
-                self._extract_sdpo_prompt_text(raw_prompts[i]) for i in range(batch_size)
-            ]
-        else:
-            prompt_texts = []
-            for i in range(batch_size):
-                try:
-                    prompt_texts.append(self._extract_sdpo_prompt_text(raw_prompts[i]))
-                except ValueError:
-                    prompt_texts.append(None)
 
         def _prepare_teacher_prompt_for_dump(text: str) -> str:
             if dump_teacher_prompt_max_chars <= 0 or len(text) <= dump_teacher_prompt_max_chars:
@@ -1509,163 +1538,6 @@ class RayPPOTrainer:
             )
             for i in range(batch_size)
         ]
-
-        failed_attempt_used: list[bool] = []
-        apply_kwargs = dict(**(self.config.data.get("apply_chat_template_kwargs", {}) or {}))
-
-        def _build_teacher_sections(i: int) -> tuple[str, str, str, bool, Optional[str]]:
-            if self_distillation_eligible_list[i] <= 0.0:
-                return "", "", "", False, None
-            has_solution = solution_strs[i] is not None
-            has_feedback = feedback_list[i] is not None or failed_verifier_trace_list[i] is not None
-            feedback_only_without_solution = self_distillation_cfg.get(
-                "environment_feedback_only_without_solution", False
-            )
-            use_feedback = has_feedback and (not feedback_only_without_solution or not has_solution)
-
-            solution_section = ""
-            if has_solution:
-                solution_section = self_distillation_cfg.solution_template.format(
-                    successful_previous_attempt=solution_strs[i]
-                )
-
-            failed_attempt_section = ""
-            sanitized_failed_attempt = None
-            if (
-                use_feedback
-                and (
-                    (
-                        not has_solution
-                        and self_distillation_cfg.get("include_failed_attempt_in_feedback_only", False)
-                    )
-                    or (has_solution and self_distillation_cfg.get("include_failed_attempt_with_solution", False))
-                )
-            ):
-                sanitized_failed_attempt = self._prepare_failed_attempt_reference(response_texts[i], self_distillation_cfg)
-
-            if sanitized_failed_attempt is not None:
-                failed_attempt_section = self_distillation_cfg.failed_attempt_template.format(
-                    previous_attempt=sanitized_failed_attempt
-                )
-
-            feedback_section = ""
-            if use_feedback:
-                feedback_section = self_distillation_cfg.feedback_template.format(feedback_raw=feedback_list[i])
-
-            use_guidance = use_feedback or has_solution
-            return solution_section, failed_attempt_section, feedback_section, use_guidance, sanitized_failed_attempt
-
-        if custom_teacher_prompt_fn is not None:
-            def _build_teacher_prompt_text(i: int) -> str:
-                solution_section, failed_attempt_section, feedback_section, use_guidance, sanitized_failed_attempt = (
-                    _build_teacher_sections(i)
-                )
-                failed_attempt_used.append(bool(sanitized_failed_attempt))
-                teacher_prompt_text = custom_teacher_prompt_fn(
-                    raw_prompt=raw_prompts[i],
-                    extra_info=extra_infos[i] if i < len(extra_infos) else None,
-                    prompt_text=prompt_texts[i],
-                    response_text=response_texts[i],
-                    solution_section=solution_section,
-                    failed_attempt_section=failed_attempt_section,
-                    failed_verifier_trace_json=failed_verifier_trace_list[i],
-                    use_guidance=use_guidance,
-                    self_distillation_cfg=self_distillation_cfg,
-                    tokenizer=self.tokenizer,
-                    apply_kwargs=apply_kwargs,
-                    **self._custom_teacher_prompt_kwargs,
-                )
-                if not isinstance(teacher_prompt_text, str):
-                    raise TypeError(
-                        "Custom teacher prompt function must return a string teacher prompt, "
-                        f"got {type(teacher_prompt_text)}."
-                    )
-                return teacher_prompt_text
-        else:
-            def _build_teacher_message(i: int) -> list[dict[str, Any]]:
-                solution_section, failed_attempt_section, feedback_section, use_guidance, sanitized_failed_attempt = (
-                    _build_teacher_sections(i)
-                )
-                prompt_text = prompt_texts[i]
-                if prompt_text is None:
-                    raise ValueError("Default SDPO teacher prompt construction requires a prompt text.")
-                system_messages = deepcopy(list(raw_prompts[i])[:-1])
-                if use_guidance:
-                    reprompt_text = self_distillation_cfg.reprompt_template.format(
-                        prompt=prompt_text,
-                        solution=solution_section,
-                        failed_attempt=failed_attempt_section,
-                        previous_attempt=response_texts[i],
-                        feedback=feedback_section,
-                    )
-                else:
-                    reprompt_text = prompt_text
-                failed_attempt_used.append(bool(sanitized_failed_attempt))
-                return system_messages + [{"role": "user", "content": reprompt_text}]
-
-        truncation_side = self_distillation_cfg.get("reprompt_truncation", None)
-        previous_truncation_side = getattr(self.tokenizer, "truncation_side", None)
-        previous_padding_side = getattr(self.tokenizer, "padding_side", None)
-        teacher_prompt_texts_for_dump: Optional[list[str]] = None
-        if truncation_side in {"left", "right"}:
-            self.tokenizer.truncation_side = truncation_side
-        # Left-pad teacher prompts so the token immediately before the response window is always a
-        # real prompt token instead of right-padding. This keeps the shifted Megatron label mask
-        # aligned with response_token_count when teacher scoring consumes response-aligned supports.
-        if previous_padding_side is not None:
-            self.tokenizer.padding_side = "left"
-        try:
-            if custom_teacher_prompt_fn is not None:
-                teacher_prompt_texts = [_build_teacher_prompt_text(i) for i in range(batch_size)]
-                if dump_teacher_prompt_text:
-                    teacher_prompt_texts_for_dump = [
-                        _prepare_teacher_prompt_for_dump(text) for text in teacher_prompt_texts
-                    ]
-                teacher_prompt = self.tokenizer(
-                    teacher_prompt_texts,
-                    add_special_tokens=False,
-                    return_tensors="pt",
-                    padding=True,
-                    truncation=True,
-                    max_length=self_distillation_cfg.max_reprompt_len,
-                )
-            else:
-                messages = [_build_teacher_message(i) for i in range(batch_size)]
-                if dump_teacher_prompt_text:
-                    teacher_prompt_texts_for_dump = [
-                        _prepare_teacher_prompt_for_dump(
-                            self.tokenizer.apply_chat_template(
-                                message,
-                                tokenize=False,
-                                add_generation_prompt=True,
-                                **apply_kwargs,
-                            )
-                        )
-                        for message in messages
-                    ]
-                teacher_prompt = self.tokenizer.apply_chat_template(
-                    messages,
-                    tokenize=True,
-                    add_generation_prompt=True,
-                    return_tensors="pt",
-                    return_dict=True,
-                    padding=True,
-                    truncation=True,
-                    max_length=self_distillation_cfg.max_reprompt_len,
-                    **apply_kwargs,
-                )
-        finally:
-            if truncation_side in {"left", "right"} and previous_truncation_side is not None:
-                self.tokenizer.truncation_side = previous_truncation_side
-            if previous_padding_side is not None:
-                self.tokenizer.padding_side = previous_padding_side
-
-        teacher_input_ids = torch.cat([teacher_prompt["input_ids"].to(device), responses], dim=1)
-        teacher_attention_mask = torch.cat(
-            [teacher_prompt["attention_mask"].to(device), response_mask.to(teacher_prompt["attention_mask"].dtype)],
-            dim=1,
-        )
-        teacher_position_ids = compute_position_id_with_mask(teacher_attention_mask)
 
         feedback_only_without_solution = self_distillation_cfg.get("environment_feedback_only_without_solution", False)
         feedback_used = [
@@ -1726,7 +1598,7 @@ class RayPPOTrainer:
                 hybrid_target_scenario_fraction = scenario_mask.float().mean().item()
                 hybrid_mask = hybrid_mask & scenario_mask
             self_distillation_mask = hybrid_mask.to(torch.float32)
-        elif loss_mode == "srpo":
+        elif loss_mode in {"srpo", "srpo_rlsd"}:
             srpo_teacher_available_mask = self_distillation_mask.bool()
             correctness_key = str(self_distillation_cfg.get("srpo_correctness_key", "scenario_score"))
             correctness_scores, correctness_available = self._collect_reward_info_scalars(
@@ -1789,6 +1661,200 @@ class RayPPOTrainer:
                 correctness_available_mask & (~correct_mask) & (~srpo_teacher_available_mask)
             ).float().mean().item()
 
+        active_indices = self_distillation_mask.bool().nonzero(as_tuple=False).view(-1).tolist()
+        failed_attempt_used: list[bool] = [False] * batch_size
+        apply_kwargs = dict(**(self.config.data.get("apply_chat_template_kwargs", {}) or {}))
+
+        def _build_teacher_sections(i: int) -> tuple[str, str, str, bool, Optional[str]]:
+            if self_distillation_eligible_list[i] <= 0.0:
+                return "", "", "", False, None
+            has_solution = solution_strs[i] is not None
+            has_feedback = feedback_list[i] is not None or failed_verifier_trace_list[i] is not None
+            use_feedback = has_feedback and (not feedback_only_without_solution or not has_solution)
+
+            solution_section = ""
+            if has_solution:
+                solution_section = self_distillation_cfg.solution_template.format(
+                    successful_previous_attempt=solution_strs[i]
+                )
+
+            failed_attempt_section = ""
+            sanitized_failed_attempt = None
+            if (
+                use_feedback
+                and (
+                    (
+                        not has_solution
+                        and self_distillation_cfg.get("include_failed_attempt_in_feedback_only", False)
+                    )
+                    or (has_solution and self_distillation_cfg.get("include_failed_attempt_with_solution", False))
+                )
+            ):
+                sanitized_failed_attempt = self._prepare_failed_attempt_reference(response_texts[i], self_distillation_cfg)
+
+            if sanitized_failed_attempt is not None:
+                failed_attempt_section = self_distillation_cfg.failed_attempt_template.format(
+                    previous_attempt=sanitized_failed_attempt
+                )
+
+            feedback_section = ""
+            if use_feedback:
+                feedback_section = self_distillation_cfg.feedback_template.format(feedback_raw=feedback_list[i])
+
+            use_guidance = use_feedback or has_solution
+            return solution_section, failed_attempt_section, feedback_section, use_guidance, sanitized_failed_attempt
+
+        if custom_teacher_prompt_fn is not None:
+            def _build_teacher_prompt_text(i: int) -> str:
+                solution_section, failed_attempt_section, feedback_section, use_guidance, sanitized_failed_attempt = (
+                    _build_teacher_sections(i)
+                )
+                failed_attempt_used[i] = bool(sanitized_failed_attempt)
+                teacher_prompt_text = custom_teacher_prompt_fn(
+                    raw_prompt=raw_prompts[i],
+                    extra_info=extra_infos[i] if i < len(extra_infos) else None,
+                    prompt_text=prompt_texts[i],
+                    response_text=response_texts[i],
+                    solution_section=solution_section,
+                    failed_attempt_section=failed_attempt_section,
+                    failed_verifier_trace_json=failed_verifier_trace_list[i],
+                    use_guidance=use_guidance,
+                    self_distillation_cfg=self_distillation_cfg,
+                    tokenizer=self.tokenizer,
+                    apply_kwargs=apply_kwargs,
+                    **self._custom_teacher_prompt_kwargs,
+                )
+                if not isinstance(teacher_prompt_text, str):
+                    raise TypeError(
+                        "Custom teacher prompt function must return a string teacher prompt, "
+                        f"got {type(teacher_prompt_text)}."
+                    )
+                return teacher_prompt_text
+        else:
+            def _build_teacher_message(i: int) -> list[dict[str, Any]]:
+                solution_section, failed_attempt_section, feedback_section, use_guidance, sanitized_failed_attempt = (
+                    _build_teacher_sections(i)
+                )
+                prompt_text = prompt_texts[i]
+                if prompt_text is None:
+                    raise ValueError("Default SDPO teacher prompt construction requires a prompt text.")
+                system_messages = deepcopy(list(raw_prompts[i])[:-1])
+                if use_guidance:
+                    reprompt_text = self_distillation_cfg.reprompt_template.format(
+                        prompt=prompt_text,
+                        solution=solution_section,
+                        failed_attempt=failed_attempt_section,
+                        previous_attempt=response_texts[i],
+                        feedback=feedback_section,
+                    )
+                else:
+                    reprompt_text = prompt_text
+                failed_attempt_used[i] = bool(sanitized_failed_attempt)
+                return system_messages + [{"role": "user", "content": reprompt_text}]
+
+        prompt_texts: dict[int, Optional[str]] = {}
+        teacher_prompt_texts_for_dump: Optional[list[Optional[str]]] = (
+            [None] * batch_size if dump_teacher_prompt_text else None
+        )
+        prompt_attention_dtype = batch.batch["attention_mask"].dtype if "attention_mask" in batch.batch else response_mask.dtype
+        pad_token_id = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else 0
+        if active_indices:
+            if custom_teacher_prompt_fn is None:
+                for i in active_indices:
+                    prompt_texts[i] = self._extract_sdpo_prompt_text(raw_prompts[i])
+            else:
+                for i in active_indices:
+                    try:
+                        prompt_texts[i] = self._extract_sdpo_prompt_text(raw_prompts[i])
+                    except ValueError:
+                        prompt_texts[i] = None
+
+            truncation_side = self_distillation_cfg.get("reprompt_truncation", None)
+            previous_truncation_side = getattr(self.tokenizer, "truncation_side", None)
+            previous_padding_side = getattr(self.tokenizer, "padding_side", None)
+            if truncation_side in {"left", "right"}:
+                self.tokenizer.truncation_side = truncation_side
+            # Left-pad teacher prompts so the token immediately before the response window is always a
+            # real prompt token instead of right-padding. This keeps the shifted Megatron label mask
+            # aligned with response_token_count when teacher scoring consumes response-aligned supports.
+            if previous_padding_side is not None:
+                self.tokenizer.padding_side = "left"
+            try:
+                if custom_teacher_prompt_fn is not None:
+                    active_teacher_prompt_texts = []
+                    for i in active_indices:
+                        teacher_prompt_text = _build_teacher_prompt_text(i)
+                        active_teacher_prompt_texts.append(teacher_prompt_text)
+                        if teacher_prompt_texts_for_dump is not None:
+                            teacher_prompt_texts_for_dump[i] = _prepare_teacher_prompt_for_dump(teacher_prompt_text)
+                    teacher_prompt = self.tokenizer(
+                        active_teacher_prompt_texts,
+                        add_special_tokens=False,
+                        return_tensors="pt",
+                        padding=True,
+                        truncation=True,
+                        max_length=self_distillation_cfg.max_reprompt_len,
+                    )
+                else:
+                    active_messages = []
+                    for i in active_indices:
+                        message = _build_teacher_message(i)
+                        active_messages.append(message)
+                        if teacher_prompt_texts_for_dump is not None:
+                            teacher_prompt_texts_for_dump[i] = _prepare_teacher_prompt_for_dump(
+                                self.tokenizer.apply_chat_template(
+                                    message,
+                                    tokenize=False,
+                                    add_generation_prompt=True,
+                                    **apply_kwargs,
+                                )
+                            )
+                    teacher_prompt = self.tokenizer.apply_chat_template(
+                        active_messages,
+                        tokenize=True,
+                        add_generation_prompt=True,
+                        return_tensors="pt",
+                        return_dict=True,
+                        padding=True,
+                        truncation=True,
+                        max_length=self_distillation_cfg.max_reprompt_len,
+                        **apply_kwargs,
+                    )
+            finally:
+                if truncation_side in {"left", "right"} and previous_truncation_side is not None:
+                    self.tokenizer.truncation_side = previous_truncation_side
+                if previous_padding_side is not None:
+                    self.tokenizer.padding_side = previous_padding_side
+
+            prompt_input_ids = teacher_prompt["input_ids"].to(device)
+            prompt_attention_mask = teacher_prompt["attention_mask"].to(device)
+            active_index_tensor = torch.tensor(active_indices, dtype=torch.long, device=device)
+            teacher_prompt_input_ids = torch.full(
+                (batch_size, prompt_input_ids.shape[1]),
+                pad_token_id,
+                dtype=prompt_input_ids.dtype,
+                device=device,
+            )
+            teacher_prompt_attention_mask = torch.zeros(
+                (batch_size, prompt_attention_mask.shape[1]),
+                dtype=prompt_attention_mask.dtype,
+                device=device,
+            )
+            teacher_prompt_input_ids[active_index_tensor] = prompt_input_ids
+            teacher_prompt_attention_mask[active_index_tensor] = prompt_attention_mask
+            teacher_prompt_lengths = prompt_attention_mask.sum(dim=1).to(torch.float32)
+        else:
+            teacher_prompt_input_ids = torch.empty((batch_size, 0), dtype=responses.dtype, device=device)
+            teacher_prompt_attention_mask = torch.zeros((batch_size, 0), dtype=prompt_attention_dtype, device=device)
+            teacher_prompt_lengths = torch.zeros(0, dtype=torch.float32, device=device)
+
+        teacher_input_ids = torch.cat([teacher_prompt_input_ids, responses], dim=1)
+        teacher_attention_mask = torch.cat(
+            [teacher_prompt_attention_mask, response_mask.to(teacher_prompt_attention_mask.dtype)],
+            dim=1,
+        )
+        teacher_position_ids = compute_position_id_with_mask(teacher_attention_mask)
+
         uids = set(batch.non_tensor_batch["uid"])
         num_with_feedback_available = sum(1 for item in feedback_list if item is not None)
         num_with_feedback_used = sum(1 for item in feedback_used if item)
@@ -1798,7 +1864,6 @@ class RayPPOTrainer:
         num_with_feedback_only = sum(1 for item in feedback_only_used if item)
         num_with_failed_attempt = sum(1 for item in failed_attempt_used if item)
         num_self_distillation_eligible = sum(1 for item in self_distillation_eligible_list if item > 0.0)
-        teacher_prompt_lengths = teacher_prompt["attention_mask"].sum(dim=1).to(torch.float32)
         metrics = {
             "self_distillation/success_group_fraction": len([uid for uid in uids if len(success_by_uid[uid]) > 0])
             / len(uids),
@@ -1814,8 +1879,12 @@ class RayPPOTrainer:
             "self_distillation/failure_only_source_gate_enabled": float(
                 bool(self_distillation_cfg.get("failure_only_source_gate", False))
             ),
-            "self_distillation/teacher_prompt_length_mean": teacher_prompt_lengths.mean().item(),
-            "self_distillation/teacher_prompt_length_max": teacher_prompt_lengths.max().item(),
+            "self_distillation/teacher_prompt_length_mean": (
+                teacher_prompt_lengths.mean().item() if teacher_prompt_lengths.numel() > 0 else 0.0
+            ),
+            "self_distillation/teacher_prompt_length_max": (
+                teacher_prompt_lengths.max().item() if teacher_prompt_lengths.numel() > 0 else 0.0
+            ),
         }
         if loss_mode in {"sdpo_grpo_hybrid", "sdpo_grpo_adv_hybrid"}:
             final_gate_fraction = self_distillation_mask.float().mean().item()
@@ -1833,7 +1902,7 @@ class RayPPOTrainer:
             metrics["rlsd/source_kept_fraction"] = (
                 rlsd_source_fraction / hybrid_source_fraction if hybrid_source_fraction > 0 else 0.0
             )
-        elif loss_mode == "srpo":
+        elif loss_mode in {"srpo", "srpo_rlsd"}:
             srpo_route_fraction = self_distillation_mask.float().mean().item()
             metrics["srpo/correct_fraction"] = srpo_correct_fraction
             metrics["srpo/correctness_available_fraction"] = correctness_available_mask.float().mean().item()
@@ -1847,6 +1916,9 @@ class RayPPOTrainer:
             metrics["srpo/route_kept_from_teacher_available_fraction"] = (
                 srpo_route_fraction / srpo_teacher_available_fraction if srpo_teacher_available_fraction > 0 else 0.0
             )
+            if loss_mode == "srpo_rlsd":
+                metrics["srpo_rlsd/rlsd_route_fraction"] = srpo_route_fraction
+                metrics["srpo_rlsd/grpo_route_fraction"] = 1.0 - srpo_route_fraction
 
         teacher_batch = DataProto.from_dict(
             tensors={

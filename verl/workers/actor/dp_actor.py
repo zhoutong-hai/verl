@@ -36,6 +36,7 @@ from verl.trainer.ppo.core_algos import (
     compute_repair_ce_loss,
     compute_rlsd_loss,
     compute_srpo_loss,
+    compute_srpo_rlsd_loss,
     compute_self_distillation_loss,
     get_policy_loss_fn,
     kl_penalty,
@@ -1003,6 +1004,20 @@ class DataParallelPPOActor(BasePPOActor):
                                 teacher_all_log_probs=teacher_all_logps,
                                 student_topk_log_probs=student_topk_logps,
                                 teacher_topk_log_probs=teacher_topk_logps,
+                            )
+                        elif loss_mode == "srpo_rlsd":
+                            pg_loss, pg_metrics = compute_srpo_rlsd_loss(
+                                old_log_prob=old_log_prob,
+                                log_prob=log_prob,
+                                advantages=advantages,
+                                response_mask=response_mask,
+                                self_distillation_config=self_distillation_cfg,
+                                config=self.config,
+                                teacher_log_probs=teacher_log_prob,
+                                self_distillation_mask=self_distillation_mask,
+                                loss_agg_mode=loss_agg_mode,
+                                rollout_is_weights=rollout_is_weights,
+                                current_global_step=current_sd_step,
                             )
                         elif loss_mode == "rlsd":
                             pg_loss, pg_metrics = compute_rlsd_loss(
