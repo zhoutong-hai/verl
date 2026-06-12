@@ -118,5 +118,6 @@ class SingleTurnAgentLoop(AgentLoopBase):
             multi_modal_data=multi_modal_data,
             num_turns=2,
             metrics=metrics,
+            extra_fields={"rollout_metadata": output.metadata} if output.metadata else {},
         )
         return output

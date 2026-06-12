@@ -17,6 +17,7 @@ import inspect
 import json
 import logging
 import os
+import time
 from concurrent.futures import Future
 from pprint import pprint
 from typing import Any, Callable, Optional
@@ -161,6 +162,19 @@ class ExternalZeroMQDistributedExecutor(Executor):
 
     def check_health(self):
         return
+
+
+async def _reset_mm_cache_if_supported(engine_client: Any) -> None:
+    reset_mm_cache = getattr(engine_client, "reset_mm_cache", None)
+    if reset_mm_cache is None:
+        return
+    result = reset_mm_cache()
+    if inspect.isawaitable(result):
+        await result
+
+
+def _has_v1_request_state(engine: Any) -> bool:
+    return hasattr(engine, "output_processor") and hasattr(engine, "engine_core")
 
 
 class vLLMHttpServerBase:
@@ -426,7 +440,7 @@ class vLLMHttpServerBase:
         engine_client = AsyncLLM.from_vllm_config(vllm_config=vllm_config, usage_context=usage_context, **kwargs)
 
         # Don't keep the dummy data in memory
-        await engine_client.reset_mm_cache()
+        await _reset_mm_cache_if_supported(engine_client)
 
         app = build_app(args)
         if _VLLM_VERSION > version.parse("0.11.0"):
@@ -490,11 +504,11 @@ class vLLMHttpServerBase:
             # support sglang-style 'max_new_tokens' param
             max_tokens = sampling_params.pop("max_new_tokens")
         else:
-            # Default to a calculation that considers configured lengths
-            max_tokens = self.config.response_length + self.config.prompt_length - len(prompt_ids)
+            max_tokens = self.config.response_length
 
-        # Clamp max_tokens to the valid range [0, max_possible_tokens]
-        max_tokens = max(0, min(max_tokens, max_possible_tokens))
+        # Keep generation within the configured response budget. The prompt may be shorter
+        # than prompt_length, but postprocessing still pads/truncates to response_length.
+        max_tokens = max(0, min(max_tokens, max_possible_tokens, self.config.response_length))
 
         assert max_tokens <= max_possible_tokens, (
             f"max_tokens {max_tokens} exceeds available context space {max_possible_tokens}"
@@ -525,16 +539,88 @@ class vLLMHttpServerBase:
             prompt=prompt, sampling_params=sampling_params, request_id=request_id, lora_request=lora_request
         )
 
-        # Get final response
-        final_res: Optional[RequestOutput] = None
-        async for output in generator:
-            final_res = output
-        assert final_res is not None
+        timeout_s = float(os.environ.get("VERL_VLLM_GENERATE_TIMEOUT_SECONDS", "0") or 0)
+        slow_log_s = float(os.environ.get("VERL_VLLM_SLOW_REQUEST_LOG_SECONDS", "0") or 0)
+        started = time.monotonic()
+        timed_out = False
 
-        token_ids = final_res.outputs[0].token_ids
+        # Keep the latest streamed output so timeouts are visible instead of blocking
+        # the whole rollout batch indefinitely.
+        final_res: Optional[RequestOutput] = None
+
+        async def _consume_generator():
+            nonlocal final_res
+            async for output in generator:
+                final_res = output
+
+        try:
+            if timeout_s > 0:
+                await asyncio.wait_for(_consume_generator(), timeout=timeout_s)
+            else:
+                await _consume_generator()
+        except asyncio.TimeoutError:
+            timed_out = True
+            duration = time.monotonic() - started
+            logger.warning(
+                "vLLM request timed out after %.1fs; request_id=%s prompt_len=%d max_tokens=%d partial_tokens=%d",
+                duration,
+                request_id,
+                len(prompt_ids),
+                max_tokens,
+                len(final_res.outputs[0].token_ids) if final_res is not None and final_res.outputs else 0,
+            )
+            abort_fn = getattr(self.engine, "abort", None)
+            if abort_fn is not None:
+                try:
+                    abort_result = abort_fn(request_id)
+                    if inspect.isawaitable(abort_result):
+                        await abort_result
+                except Exception:
+                    logger.exception("Failed to abort timed-out vLLM request_id=%s", request_id)
+
+        if final_res is None or not final_res.outputs:
+            return TokenOutput(
+                token_ids=[],
+                log_probs=None,
+                routed_experts=None,
+                stop_reason="timeout",
+                metadata={
+                    "request_id": request_id,
+                    "stop_reason": "timeout",
+                    "timed_out": True,
+                    "invalid_special_token": False,
+                    "generated_token_count": 0,
+                    "prompt_token_count": len(prompt_ids),
+                    "max_tokens": max_tokens,
+                },
+            )
+
+        duration = time.monotonic() - started
+        if slow_log_s > 0 and duration >= slow_log_s:
+            logger.warning(
+                "Slow vLLM request finished in %.1fs; request_id=%s prompt_len=%d max_tokens=%d output_tokens=%d",
+                duration,
+                request_id,
+                len(prompt_ids),
+                max_tokens,
+                len(final_res.outputs[0].token_ids) if final_res.outputs else 0,
+            )
+
+        token_ids = list(final_res.outputs[0].token_ids)[: self.config.response_length]
+        bos_token_id = getattr(self.model_config.hf_config, "bos_token_id", None)
+        bos_token_ids = bos_token_id if isinstance(bos_token_id, list) else [bos_token_id]
+        bos_token_ids = {int(token_id) for token_id in bos_token_ids if token_id is not None}
+        invalid_special_token = bool(token_ids and token_ids[0] in bos_token_ids)
+        if invalid_special_token:
+            logger.warning(
+                "Generated response starts with model BOS token; request_id=%s token_id=%s",
+                request_id,
+                token_ids[0],
+            )
         log_probs = None
-        if sampling_params.logprobs is not None:
-            log_probs = [logprobs[token_ids[i]].logprob for i, logprobs in enumerate(final_res.outputs[0].logprobs)]
+        if sampling_params.logprobs is not None and final_res.outputs[0].logprobs is not None:
+            output_logprobs = final_res.outputs[0].logprobs[: len(token_ids)]
+            log_probs = [logprobs[token_ids[i]].logprob for i, logprobs in enumerate(output_logprobs)]
 
         routed_experts = None
         if self.config.enable_rollout_routing_replay:
@@ -542,7 +628,9 @@ class vLLMHttpServerBase:
 
         # Determine stop reason from finish_reason
         finish_reason = final_res.outputs[0].finish_reason
-        if finish_reason == "abort":
+        if timed_out:
+            stop_reason = "timeout"
+        elif finish_reason == "abort":
             stop_reason = "aborted"
         elif finish_reason in ("stop", "length"):
             stop_reason = "completed"
@@ -550,7 +638,19 @@ class vLLMHttpServerBase:
             stop_reason = finish_reason  # for more stop reason in the future
 
         return TokenOutput(
-            token_ids=token_ids, log_probs=log_probs, routed_experts=routed_experts, stop_reason=stop_reason
+            token_ids=token_ids,
+            log_probs=log_probs,
+            routed_experts=routed_experts,
+            stop_reason=stop_reason,
+            metadata={
+                "request_id": request_id,
+                "stop_reason": stop_reason,
+                "timed_out": timed_out,
+                "invalid_special_token": invalid_special_token,
+                "generated_token_count": len(token_ids),
+                "prompt_token_count": len(prompt_ids),
+                "max_tokens": max_tokens,
+            },
         )
 
     async def wake_up(self):
@@ -581,7 +681,12 @@ class vLLMHttpServerBase:
             await self.engine.reset_prefix_cache()
 
     async def wait_for_requests_to_drain(self):
-        await self.engine.wait_for_requests_to_drain()
+        wait_fn = getattr(self.engine, "wait_for_requests_to_drain", None)
+        if wait_fn is None:
+            # vLLM V0 AsyncLLMEngine does not expose the V1 drain helper. This method is only
+            # called after rollout generation returns, so there should be no active requests.
+            return
+        await wait_fn()
 
     async def abort_all_requests(self, reset_prefix_cache: bool = True) -> dict[str, Any]:
         """Abort all ongoing generation requests.
@@ -592,6 +697,12 @@ class vLLMHttpServerBase:
                 - request_ids: List of aborted request IDs
         """
         try:
+            if not _has_v1_request_state(self.engine):
+                return {
+                    "aborted_count": 0,
+                    "request_ids": [],
+                    "error": "abort_all_requests is only implemented for vLLM V1 engine state",
+                }
             # Take an atomic snapshot to avoid race conditions with the vLLM engine thread
             request_states_snapshot = list(self.engine.output_processor.request_states.items())
             request_ids = [req_id for req_id, _ in request_states_snapshot]
@@ -635,6 +746,12 @@ class vLLMHttpServerBase:
             dict[str, Any]: Dictionary containing abort result.
         """
         try:
+            if not _has_v1_request_state(self.engine):
+                return {
+                    "aborted": False,
+                    "request_id": request_id,
+                    "error": "abort_request is only implemented for vLLM V1 engine state",
+                }
             request_states = self.engine.output_processor.request_states
             req_state = request_states.get(request_id)
 

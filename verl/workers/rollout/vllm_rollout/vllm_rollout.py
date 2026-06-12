@@ -103,7 +103,8 @@ def _monkey_patch_compute_logits(model, vocab_size: int):
         **kwargs,
     ) -> torch.Tensor:
         logits = original_compute_logits(*args, **kwargs)
-        logits[..., vocab_size:] = float("-inf")
+        if logits is not None:
+            logits[..., vocab_size:] = float("-inf")
         return logits
 
     model.compute_logits = MethodType(compute_logits, model)

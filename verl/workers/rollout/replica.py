@@ -19,7 +19,7 @@ from enum import Enum
 from typing import Any, Callable, Optional
 
 from omegaconf import DictConfig
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from ray.actor import ActorHandle
 
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
@@ -38,7 +38,9 @@ class TokenOutput(BaseModel):
     routed_experts: Optional[Any] = None
     """routed experts of response token ids"""
     stop_reason: Optional[str] = None
-    """stop reason: 'completed', 'aborted', or None for unknown"""
+    """stop reason: 'completed', 'aborted', 'timeout', or None for unknown"""
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    """rollout-runtime metadata such as timeout or invalid-output diagnostics"""
 
 
 class RolloutMode(Enum):
